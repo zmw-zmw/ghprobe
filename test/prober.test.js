@@ -3,7 +3,7 @@
 // prober 应用层终审单测：不连真实网络，只校验判定函数
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DOMAIN_SIG, checkHttpResponse } from "../src/prober.js";
+import { DOMAIN_SIG, checkHttpResponse, looksLikeTlsBlocked } from "../src/prober.js";
 
 const gh = DOMAIN_SIG["github.com"];
 const codeload = DOMAIN_SIG["codeload.github.com"];
@@ -109,4 +109,26 @@ test("DOMAIN_SIG 覆盖全部默认目标域名及兜底 CDN", () => {
     assert.ok(DOMAIN_SIG[d].allow.length > 0);
     assert.ok(DOMAIN_SIG[d].reject.length > 0);
   }
+});
+
+// ============================================================================
+// 2026-10-11 新增：区分「IP 不可用」与「本机 TLS 指纹被阻断」
+// 实测：同 IP、同 SNI、同时间，openssl s_client 20/20 成功、node 5/20、curl 3/20，
+//       而浏览器（Edge）能正常打开同一 URL。ghprobe 自己是 Node，
+//       把这类失败当成「IP 不可用」会误伤浏览器其实能用的域名。
+// ============================================================================
+test("looksLikeTlsBlocked: TCP 连上但 TLS 被 reset -> 判定为指纹阻断", () => {
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tls", err: "ECONNRESET" }), true);
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tls", err: "timeout" }), true);
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tls", err: "socket hang up" }), true);
+});
+
+test("looksLikeTlsBlocked: TCP 阶段就失败 / 成功 / 证书错误 -> 不算指纹阻断", () => {
+  // TCP 都没连上 = IP 真的不可用
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tcp", err: "timeout" }), false);
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tcp", err: "ECONNREFUSED" }), false);
+  // 成功的不算
+  assert.equal(looksLikeTlsBlocked({ ok: true }), false);
+  // 证书不匹配属于「IP 服务了别的域名」，不是指纹问题
+  assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tls", err: "ERR_TLS_CERT_ALTNAME_INVALID" }), false);
 });

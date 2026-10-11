@@ -25,7 +25,7 @@ ghprobe install     # probe once + write hosts + register the per-minute health 
 ghprobe uninstall   # stop: remove the scheduled task and restore hosts
 ```
 
-Ready to use right away — you never touch the command line again. Full commands and configuration are in section 4, "Usage".
+Ready to use right away — you never touch the command line again. Full commands and configuration are in section 5, "Usage".
 
 ---
 
@@ -89,15 +89,15 @@ It writes the hosts file, and nothing else. No proxy software, no system proxy s
 | **SNI hostname blacklist** | the hostname itself is blocked — the SNI in the TLS handshake carries the blocked domain | ❌ No. No IP will help; only **changing the domain** works |
 | **IP blackhole** | entire IP ranges are dropped | ✅ Yes. Switch to a working range |
 
-Many tools/tutorials only handle the first layer and are helpless against the second (e.g. `raw.githubusercontent.com` being precisely RST). ghprobe handles the second layer with a dedicated **fallback chain** (see section 5), treating the "changing the IP can't fix it" case separately.
+**Hosts-only** tools/tutorials handle only the first layer and are helpless against the second (e.g. `raw.githubusercontent.com` being precisely RST). ghprobe handles the second layer with a dedicated **fallback chain** (see section 6), treating the "changing the IP can't fix it" case separately.
 
 ---
 
 ## 2. Pain points it solves
 
-**Pain point 1: direct GitHub access is sometimes fast, sometimes dead**
+**Pain point 1: GitHub won't open, images won't load, `git clone` is slow**
 
-`git clone` stalls at `Receiving objects`, `git push` times out, pages spin — same repo, same network, works in the morning, dead at night. Because the usable IPs for each GitHub domain drift with region, ISP, and time of day, and the address system DNS hands you is often slow or broken.
+`git clone` stalls at `Receiving objects`, `git push` times out, pages spin, and every image in a README is a broken icon — same repo, same network, works in the morning, dead at night. Because the usable IPs for each GitHub domain drift with region, ISP, and time of day, and the address system DNS hands you is often slow or broken.
 
 **Pain point 2: the hosts list you copied is a static snapshot**
 
@@ -117,7 +117,63 @@ IPs usually die while you are not looking. With no automatic check, you only fin
 
 ---
 
-## 3. How it works
+## 3. How it differs from similar projects
+
+GitHub acceleration already has mature projects. They fall into three groups — here is where ghprobe stands, and what each approach costs:
+
+|  | Static hosts snapshots<br>(e.g. GitHub520, ineo6/hosts) | Local proxy<br>(e.g. dev-sidecar) | **ghprobe** |
+| --- | --- | --- | --- |
+| How it works | The maintainer probes once and ships one hosts file to everyone | Install a local proxy that forwards requests to acceleration endpoints | Probes **your own network** and writes hosts only |
+| Anything to install? | No | Yes — proxy / certificate, plus a **resident process** | No (just a scheduled task that runs once a minute and exits in seconds) |
+| Changes the system proxy? | No | **Yes** | No |
+| Where the IPs come from | Someone else's measurement — not necessarily best for you | N/A | DoH + the three-stage probe, run **on your machine** |
+| When an IP dies | Wait for the maintainer to update | N/A | **Swapped automatically** (per-minute sentinel) |
+| Can it spot "false-alive" IPs? | No | N/A | Yes — gate 3 validates against a real business path |
+| Platform | Cross-platform | Windows / macOS / Linux | Windows |
+
+The costs of each approach are real, not theoretical:
+
+- **Static snapshots rot.** The IPs were measured at one point in time, from one vantage point — not necessarily best for *your* ISP; and once the maintainer stops updating, it is dead. `ineo6/hosts` content is frozen at 2023-03-08; `GitHub520`'s README says its server expires 2026-12-31 and asks for 831 CNY/year in sponsorship.
+- **A local proxy has a system-level cost.** Proxy, certificate, resident process — it rewrites the network path for everything, when all you wanted was a faster `git clone`. `dev-sidecar`'s own README records that an early version, if you rebooted with it running, left you with no network at all.
+- **A hosts manager only solves "how to edit"** — you still have to find the IPs yourself.
+
+ghprobe's trade-off: **it only does "pick good IPs + maintain them", and never touches the system network path.** The cost is Windows-only, plus one UAC prompt at `install` time — after that a highest-privilege scheduled task runs silently.
+
+### Limits: what it cannot fix
+
+"GitHub is unreachable" is not one problem — it is four problems at four different layers. ghprobe only handles the first three:
+
+| Fault layer | Symptom | Fixable by changing the IP? | ghprobe |
+| --- | --- | --- | --- |
+| **DNS poisoning** | resolves to a wrong / unreachable IP | Yes | Yes — DoH bypasses system DNS |
+| **IP blackhole / churn** | connection timeout (`ERR_CONNECTION_TIMED_OUT`) | Yes | Yes — probing + per-minute self-healing |
+| **False-alive IP** | TCP/TLS fine, HTTP returns 4xx | Yes | Yes — gate 3 validates the real business path |
+| **ClientHello fingerprint blocking** | connection reset (`ERR_CONNECTION_RESET`) | **No** | **No** — see below |
+
+The last layer needs its own explanation, because it is the most easily misunderstood. Measured (same IP `185.199.110.133`, same SNI `raw.githubusercontent.com`, same moment, 20 trials each):
+
+| Client | Handshake success |
+| --- | --- |
+| `openssl s_client` | **20/20** |
+| Node.js `tls.connect` | 5/20 |
+| `curl` | 3/20 |
+
+**Same IP, same hostname, only the client changes — and the success rate drops from 100% to 15%.** So the block keys on the **shape of the TLS ClientHello** (extension list, order, length) — not on the hostname itself, and not on the IP. Two consequences:
+
+1. **Changing the IP cannot fix it** — only changing the domain can (which is why there is a fallback chain: `raw.githubusercontent.com -> cdn.jsdelivr.net`).
+2. **This tool's probe results do not fully represent your experience** — ghprobe is Node, and its TLS fingerprint differs from your browser's. Measured: `raw.githubusercontent.com` opens fine in a browser, while the Node probe gets `ECONNRESET` on every candidate. In that case the tool writes `# blocked` (not `# absent`), meaning **inconclusive** rather than "unreachable":
+
+   ```text
+   # blocked raw.githubusercontent.com 2026-10-11T10:27:09.367Z
+   ```
+
+   `# absent` = probed, genuinely no usable IP. `# blocked` = the local probe client got fingerprinted; your browser may well work.
+
+**Fixing the fourth layer** requires packet-level techniques (TTL manipulation, decoy packets, TCP-layer desync), which need a kernel driver (tools like GoodbyeDPI). That directly conflicts with this project's "no driver, no system network path changes" trade-off, so it is **deliberately out of scope**. ghprobe's job is: **given the network you already have, pick the right IPs and keep them working.**
+
+---
+
+## 4. How it works
 
 ### Overall flow
 
@@ -223,7 +279,7 @@ A domain may appear on several lines (2 by default): **the first line is the cur
 
 ---
 
-## 4. Usage
+## 5. Usage
 
 > Platform: **Windows**; prerequisite: **Node.js ≥ 18**. Run all commands in **PowerShell or cmd**.
 
@@ -422,7 +478,7 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 ---
 
-## 5. About "why is cdn.jsdelivr.net in there?"
+## 6. About "why is cdn.jsdelivr.net in there?"
 
 **`cdn.jsdelivr.net` is not a domestic mirror.** It is the jsDelivr public CDN (running on Cloudflare). It appears in hosts for exactly one reason: the **fallback chain**.
 
@@ -455,7 +511,7 @@ The cost: once `raw.githubusercontent.com` is SNI-blocked, that class of files h
 
 ---
 
-## 6. Requirements and FAQ
+## 7. Requirements and FAQ
 
 ### Requirements
 

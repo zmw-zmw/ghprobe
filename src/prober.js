@@ -105,8 +105,7 @@ function tcpTlsProbe(ip, domain, tcpMs, tlsMs) {
 }
 
 // 读取响应体前 n 字节，用于特征校验；读够后立即断开，不下载完整大页面
-function readPrefix(res, maxBytes) {
-  return new Promise((resolve) => {
+function readPrefix(res, maxBytes) {  return new Promise((resolve) => {
     const chunks = [];
     let got = 0;
     let settled = false;
@@ -161,12 +160,32 @@ function httpProbe(ip, domain, httpMs) {
   });
 }
 
+// 🔴 区分两类失败（2026-10-11 实测）：
+//   ① stage=tcp  —— TCP 握手就没成功（超时 / 拒绝）-> 这个 IP 确实不可用
+//   ② stage=tls  —— **TCP 连上了，但 TLS 阶段被重置或永远不完成** -> 很可能不是 IP 的问题，
+//      而是本机 TLS 指纹被中间设备识别后掐断（DPI 按 ClientHello 的形态放行/拦截）。
+//
+//   为什么必须区分：实测同一 IP、同一 SNI、同一时刻 ——
+//     openssl s_client 20/20 握手成功，node tls.connect 5/20，curl 3/20；
+//     而浏览器（Edge）能正常打开同一个 URL。
+//   ghprobe 自己就是 Node，**它的探测客户端指纹和用户的浏览器不同** ——
+//   把 ② 判成「IP 不可用」会把「浏览器其实能用」的域名误记成不可达（假阴性），
+//   还会写进 `# absent` 冷却让工具主动放弃它。
+const RESET_RE = /ECONNRESET|EPIPE|ECONNABORTED|socket hang up|Client network socket disconnected/i;
+export function looksLikeTlsBlocked(failure) {
+  if (!failure || failure.ok || failure.stage !== "tls") { return false; }
+  const err = String(failure.err || "");
+  return RESET_RE.test(err) || err === "timeout";
+}
+
 // 探测单个 (域名, IP)：三关全过才算活；分数越小越优
 export async function probeIp(domain, ip, cfg) {
   const { tlsMs, httpMs } = cfg.timeouts;
   const tcpMs = cfg.timeouts.tcpMs ?? tlsMs; // 老配置没这一项时退回 tlsMs，行为不变
   const g = await tcpTlsProbe(ip, domain, tcpMs, tlsMs);
-  if (!g.ok) { return { domain, ip, ok: false, stage: g.stage, err: g.err }; }
+  if (!g.ok) {
+    return { domain, ip, ok: false, stage: g.stage, err: g.err, tlsBlocked: looksLikeTlsBlocked(g) };
+  }
   const h = await httpProbe(ip, domain, httpMs);
   const tlsCost = g.tlsMs - g.tcpMs;
   const score = Math.round(g.tcpMs * 0.4 + tlsCost * 0.4 + (h.ok ? h.ttfb : httpMs) * 0.2);

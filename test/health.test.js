@@ -3,7 +3,7 @@
 // 调度层离线单测：解析/序列化/决策/部分更新/全灭护栏（不联网、不写系统文件）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseBlock, buildHealthBlock, decide, applyDelta, targetDomains, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
+import { parseBlock, buildHealthBlock, decide, applyDelta, targetDomains, blockFromProbeResult, shouldKeepOldBlock, blockedDomainsFromRaw } from "../src/health.js";
 
 const cfg = {
   domains: ["github.com", "codeload.github.com", "raw.githubusercontent.com"],
@@ -448,4 +448,96 @@ test("applyDelta: 探到新备选时排在前，旧备选在后，按 maxEntries
   const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }, { ip: "5.5.5.5" }]]]);
   const d = applyDelta(current, ranked, new Map(), ["github.com"], cfg);
   assert.deepEqual(d.extras.get("github.com"), ["5.5.5.5"]);
+});
+// ============================================================================
+// 2026-10-11 新增：`# blocked`（探测不可判）与 `# absent`（确实无可用 IP）分开
+// 动机：浏览器能打开 raw.githubusercontent.com，但 Node/curl 被指纹重置 ——
+//       工具把后者写成 `# absent` 会让日志和 hosts 都误导用户。
+// ============================================================================
+
+test("parseBlock: 解析 # blocked 注释（与 # absent 分开）", () => {
+  const content = [
+    "# === ghprobe begin ===",
+    "20.205.243.166 github.com",
+    "# absent codeload.github.com 2026-10-11T00:00:00.000Z",
+    "# blocked raw.githubusercontent.com 2026-10-11T00:00:00.000Z",
+    "# === ghprobe end ===",
+  ].join("\n");
+  const p = parseBlock(content);
+  assert.equal(p.absent.get("codeload.github.com"), "2026-10-11T00:00:00.000Z");
+  assert.equal(p.blocked.get("raw.githubusercontent.com"), "2026-10-11T00:00:00.000Z");
+  assert.equal(p.absent.has("raw.githubusercontent.com"), false);
+});
+
+test("buildHealthBlock: 写出 # blocked 且与 # absent 不混", () => {
+  const block = buildHealthBlock(
+    new Map([["github.com", "1.1.1.1"]]),
+    new Map([["codeload.github.com", "2026-10-11T00:00:00.000Z"]]),
+    new Map(),
+    new Map([["raw.githubusercontent.com", "2026-10-11T00:00:00.000Z"]]),
+  );
+  const p = parseBlock(block);
+  assert.equal(p.blocked.get("raw.githubusercontent.com"), "2026-10-11T00:00:00.000Z");
+  assert.equal(p.absent.get("codeload.github.com"), "2026-10-11T00:00:00.000Z");
+});
+
+test("blockedDomainsFromRaw: 全部候选都在 TLS 阶段被重置 -> 判为指纹阻断", () => {
+  const raw = [
+    { domain: "raw.githubusercontent.com", ip: "1.1.1.1", ok: false, stage: "tls", err: "ECONNRESET", tlsBlocked: true },
+    { domain: "raw.githubusercontent.com", ip: "2.2.2.2", ok: false, stage: "tls", err: "timeout", tlsBlocked: true },
+    { domain: "github.com", ip: "3.3.3.3", ok: true },
+  ];
+  const b = blockedDomainsFromRaw(raw);
+  assert.equal(b.has("raw.githubusercontent.com"), true);
+  assert.equal(b.has("github.com"), false, "有活 IP 的域名不算阻断");
+});
+
+test("blockedDomainsFromRaw: 混合失败（一半黑洞一半 reset）不算阻断", () => {
+  const raw = [
+    { domain: "x.com", ip: "1.1.1.1", ok: false, stage: "tls", err: "ECONNRESET", tlsBlocked: true },
+    { domain: "x.com", ip: "2.2.2.2", ok: false, stage: "tcp", err: "timeout", tlsBlocked: false },
+  ];
+  assert.equal(blockedDomainsFromRaw(raw).has("x.com"), false);
+});
+
+test("applyDelta: 指纹阻断的域名写 blocked 而不是 absent", () => {
+  const current = { entries: new Map(), extras: new Map(), absent: new Map(), blocked: new Map() };
+  const d = applyDelta(current, new Map(), new Map(), ["raw.githubusercontent.com"], cfg, new Map(),
+    new Set(["raw.githubusercontent.com"]));
+  assert.equal(d.blocked.has("raw.githubusercontent.com"), true);
+  assert.equal(d.absent.has("raw.githubusercontent.com"), false);
+  assert.deepEqual(d.sniBlocked, ["raw.githubusercontent.com"]);
+});
+
+test("applyDelta: 普通失败仍写 absent（不能把两类混为一谈）", () => {
+  const current = { entries: new Map(), extras: new Map(), absent: new Map(), blocked: new Map() };
+  const d = applyDelta(current, new Map(), new Map(), ["codeload.github.com"], cfg, new Map(), new Set());
+  assert.equal(d.absent.has("codeload.github.com"), true);
+  assert.equal(d.blocked.has("codeload.github.com"), false);
+});
+
+test("applyDelta: 域名重新探到活 IP -> 清掉 blocked", () => {
+  const current = {
+    entries: new Map(), extras: new Map(), absent: new Map(),
+    blocked: new Map([["raw.githubusercontent.com", "2026-10-11T00:00:00.000Z"]]),
+  };
+  const ranked = new Map([["raw.githubusercontent.com", [{ ip: "9.9.9.9" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["raw.githubusercontent.com"], cfg, new Map(), new Set());
+  assert.equal(d.entries.get("raw.githubusercontent.com"), "9.9.9.9");
+  assert.equal(d.blocked.has("raw.githubusercontent.com"), false);
+});
+
+test("decide: blocked 冷却内的域名不再纳入重排（避免每分钟空探）", () => {
+  const now = new Date().toISOString();
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "2.2.2.2"]]),
+    extras: new Map(), absent: new Map(),
+    blocked: new Map([["raw.githubusercontent.com", now]]),
+  };
+  const d = decide([
+    { domain: "github.com", ok: true },
+    { domain: "codeload.github.com", ok: true },
+  ], current, cfg);
+  // raw 在 blocked 冷却内 -> 不当作「缺失」，否则每分钟都会为它白跑一次全量探测
+  assert.equal(d.action, "none");
 });

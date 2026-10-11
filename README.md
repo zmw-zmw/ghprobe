@@ -139,6 +139,38 @@ GitHub 加速这个需求已经有成熟项目在做，大致分三类。ghprobe
 
 ghprobe 的取舍是：**只做「优选 IP + 自动维护」，不碰系统网络路径**。代价是只支持 Windows（写 hosts、UAC 提权、计划任务都是 Windows 专有能力），且改 hosts 需要一次 UAC 授权 —— `install` 时弹一次，之后由最高权限的计划任务静默运行。
 
+### 边界：哪些问题它解决不了
+
+「GitHub 连不上」不是**一个**问题，是**四个不同层**的问题。ghprobe 只在前三层有效：
+
+| 故障层 | 现象 | 换 IP 能修？ | ghprobe |
+| --- | --- | --- | --- |
+| **DNS 污染** | 解析到错误 / 不可达 IP | ✅ | ✅ DoH 绕开系统 DNS |
+| **IP 黑洞 / 抖动** | 连接超时（`ERR_CONNECTION_TIMED_OUT`） | ✅ | ✅ 探测优选 + 每分钟自愈 |
+| **假活 IP** | TCP/TLS 通、但 HTTP 返回 4xx | ✅ | ✅ 第三关按真实业务路径终审 |
+| **ClientHello 指纹封锁** | 连接被重置（`ERR_CONNECTION_RESET`） | ❌ | ❌ 见下 |
+
+最后一层要单独讲，因为它最容易被误解 —— 实测数据（同一 IP `185.199.110.133`、同一 SNI `raw.githubusercontent.com`、同一时刻，各 20 次）：
+
+| 客户端 | 握手成功率 |
+| --- | --- |
+| `openssl s_client` | **20/20** |
+| Node.js `tls.connect` | 5/20 |
+| `curl` | 3/20 |
+
+**同一个 IP、同一个主机名，只换客户端，结果从 100% 掉到 15%。** 说明拦截依据是 **TLS ClientHello 的形态**（扩展列表、顺序、长度），既不是主机名本身，也不是 IP。这带来两个后果：
+
+1. **换 IP 修不了它** —— 只能换域名（所以本工具有兜底链：`raw.githubusercontent.com → cdn.jsdelivr.net`）。
+2. **本工具的探测结果不能完全代表你的体验** —— 它自己是 Node，TLS 指纹和你用的浏览器不同。实测：`raw.githubusercontent.com` 在浏览器里能正常打开，而 Node 探测全部 `ECONNRESET`。遇到这种情况工具会写 `# blocked`（而不是 `# absent`），明确表示**探测不可判**，不是「该域名不可达」：
+
+   ```text
+   # blocked raw.githubusercontent.com 2026-10-11T10:27:09.367Z
+   ```
+
+   两种标记的区别：`# absent` = 探过、确实没有可用 IP；`# blocked` = 本机探测客户端被识别，你的浏览器很可能照样能用。
+
+**要解决第四层**需要包级手法（TTL 操纵、伪包、TCP 层 desync），那必须装内核驱动（类似 GoodbyeDPI 那类工具）。这跟本项目「不装驱动、不改系统网络路径」的取舍直接冲突，所以**刻意不做**。本工具的定位是：**在你现有的网络条件下，把 IP 选对、并持续维护**。
+
 ---
 
 ## 4. 工作原理
