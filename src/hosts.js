@@ -142,21 +142,24 @@ export async function runElevated(content) {
   }
 }
 
-// 事务化提权写入：备份 -> 覆盖 -> 校验含 BEGIN -> 失败回滚 -> 刷 DNS 缓存
-export async function applyHosts(merged, hostsPath = WIN_HOSTS) {
-  const tmp = path.join(os.tmpdir(), `ghprobe-hosts-${Date.now()}.tmp`);
-  fs.writeFileSync(tmp, merged, "utf8");
+// 构造 hosts 写入脚本（由 runElevated 提权执行）。两个要点：
+// ① 备份**每次刷新**（不是「只建一次」）—— 只建一次时，若 hosts 在安装后被第三方追加了
+//    条目，那份陈旧备份里没有它们，卸载/回滚时会把它们一起抹掉。
+// ② 读写统一用 [Text.Encoding]::Default（系统 ANSI 代码页），保证 hosts 里的非 ASCII
+//    注释（不少工具会写中文标记）编码不变。
+export function buildApplyScript(hostsPath, tmpPath) {
   const bak = `${hostsPath}.ghprobe-bak`;
-  const script = `
+  return `
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
-$tmp = '${tmp}'
+$tmp = '${tmpPath}'
 $bak = '${bak}'
 $marker = '${BEGIN}'
+$enc = [Text.Encoding]::Default
 try {
-  if (-not (Test-Path $bak)) { Copy-Item -Force $src $bak }
+  Copy-Item -Force $src $bak
   Copy-Item -Force $tmp $src
-  $now = Get-Content $src -Raw -ErrorAction Stop
+  $now = [IO.File]::ReadAllText($src, $enc)
   if ($now -notmatch [regex]::Escape($marker)) {
     Copy-Item -Force $bak $src
     [Console]::Error.WriteLine('hosts 校验失败：未找到 ghprobe 标记，已回滚')
@@ -170,30 +173,30 @@ try {
   exit 1
 }
 `;
-  try {
-    const r = await runElevated(script);
-    if (r.code !== 0) { throw new Error(`提权写入失败: ${r.err || r.out}`); }
-    return { ok: true, backup: bak };
-  } finally {
-    try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
-  }
 }
 
-// 还原 hosts：优先用备份恢复；无备份则移除 ghprobe 块后写回；最后刷 DNS 缓存
-export async function restoreHosts(hostsPath = WIN_HOSTS) {
-  const bak = `${hostsPath}.ghprobe-bak`;
-  const script = `
+// 构造 hosts 还原脚本（由 runElevated 提权执行）：剥掉整个 ghprobe 块后写回。
+// 刻意**不**用 *.ghprobe-bak 直接覆盖 —— 备份是「写入前」的快照，可能含旧块，也可能
+// 早于第三方后来追加的条目。直接剥块才能保证「只移除 ghprobe 自己的行」。
+// 🔴 必须用状态机跳过 begin..end 之间的**所有行**：早期写法是 `Where-Object { $_ -notmatch
+//    '^# === ghprobe (begin|end) ===' }`，它只删标记行、把块内 IP 条目全留下 ——
+//    以前靠备份分支兜着没暴露，去掉备份分支后就会留下一堆孤儿条目。
+export function buildRestoreScript(hostsPath) {
+  return `
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
-$bak = '${bak}'
+$enc = [Text.Encoding]::Default
 try {
-  if (Test-Path $bak) {
-    Copy-Item -Force $bak $src
-  } else {
-    $current = Get-Content $src -Raw -ErrorAction Stop
-    $clean = ($current -split '\r?\n' | Where-Object { $_ -notmatch '^# === ghprobe (begin|end) ===' }) -join "\n"
-    [IO.File]::WriteAllText($src, $clean.TrimEnd() + "\n")
+  $current = [IO.File]::ReadAllText($src, $enc)
+  $keep = @()
+  $skip = $false
+  foreach ($line in ($current -split '\\r?\\n')) {
+    if ($line -match '^# === ghprobe begin ===') { $skip = $true; continue }
+    if ($line -match '^# === ghprobe end ===') { $skip = $false; continue }
+    if (-not $skip) { $keep += $line }
   }
+  $clean = ($keep -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine
+  [IO.File]::WriteAllText($src, $clean, $enc)
   ipconfig /flushdns | Out-Null
   exit 0
 } catch {
@@ -201,7 +204,24 @@ try {
   exit 1
 }
 `;
-  const r = await runElevated(script);
+}
+
+// 事务化提权写入：刷新备份 -> 覆盖 -> 校验含 BEGIN -> 失败回滚 -> 刷 DNS 缓存
+export async function applyHosts(merged, hostsPath = WIN_HOSTS) {
+  const tmp = path.join(os.tmpdir(), `ghprobe-hosts-${Date.now()}.tmp`);
+  fs.writeFileSync(tmp, merged, "utf8");
+  try {
+    const r = await runElevated(buildApplyScript(hostsPath, tmp));
+    if (r.code !== 0) { throw new Error(`提权写入失败: ${r.err || r.out}`); }
+    return { ok: true, backup: `${hostsPath}.ghprobe-bak` };
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
+  }
+}
+
+// 还原 hosts：剥掉 ghprobe 块后写回；最后刷 DNS 缓存
+export async function restoreHosts(hostsPath = WIN_HOSTS) {
+  const r = await runElevated(buildRestoreScript(hostsPath));
   if (r.code !== 0) { throw new Error(`还原 hosts 失败: ${r.err || r.out}`); }
   return { ok: true };
 }

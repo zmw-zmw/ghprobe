@@ -2,8 +2,15 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
+    name: test (${{ matrix.os }})
     strategy:
+      # 一个平台失败不掩盖另一个平台的结果
+      fail-fast: false
       matrix:
+        # windows-latest：全量，含 hosts 写入 / 提权脚本 / 计划任务等 PowerShell 用例
+        # ubuntu-latest ：仅跨平台逻辑（解析 / 排序 / DoH 报文 / HTTP API）；
+        #                 hosts 写入相关用例带 { skip: platform !== 'win32' } 会自动跳过。
+        #                 注意：ghprobe 的「写 hosts / 建计划任务」能力本身仅 Windows 可用。
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:

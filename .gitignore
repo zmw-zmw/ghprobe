@@ -1,2 +1,5 @@
 node_modules/
 *.log
+
+# 本地 npm 镜像等个人环境配置，不应进版本库
+.npmrc

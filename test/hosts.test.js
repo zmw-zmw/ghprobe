@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom } from "../src/hosts.js";
+import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom, buildApplyScript, buildRestoreScript } from "../src/hosts.js";
 
 const ranked = new Map([["github.com", [{ ip: "20.205.243.166" }, { ip: "20.27.177.113" }]]]);
 const extra = new Map([["cdn.jsdelivr.net", [{ ip: "104.16.0.1" }]]]);
@@ -157,5 +157,82 @@ test("带 BOM 的提权脚本：Node 侧收到的中文 stderr 不乱码", { ski
     assert.ok(!/[\u4e00-\u9fff]/.test(r.err) || r.err.includes("计划任务"), "stderr 应包含完整可读中文提示");
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
+  }
+});
+
+// ── 备份刷新与还原语义（C3）──────────────────────────────────────────
+// 旧实现两个毛病：① 备份「只建一次」，hosts 被第三方追加条目后那份备份是陈旧的，
+// 卸载/回滚会连带抹掉别人的条目；② restoreHosts 直接拿备份覆盖，同样丢条目。
+const PS = "powershell";
+const runPs1 = (file) => new Promise((resolve) => {
+  execFile(PS, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file], (e, out, err) => {
+    resolve({ code: e ? (typeof e.code === "number" ? e.code : 1) : 0, err: String(err) });
+  });
+});
+
+test("buildApplyScript: 备份必须每次刷新（不能只在缺失时创建）", () => {
+  const s = buildApplyScript("C:\\Windows\\System32\\drivers\\etc\\hosts", "C:\\tmp\\x.tmp");
+  assert.ok(s.includes("Copy-Item -Force $src $bak"), "缺少备份步骤");
+  assert.ok(!s.includes("if (-not (Test-Path $bak))"), "备份只在缺失时创建：hosts 被第三方追加条目后，卸载会连带抹掉");
+  assert.ok(s.includes("[Text.Encoding]::Default"), "读写应用系统 ANSI 编码，避免改动 hosts 中非 ASCII 注释的字节");
+});
+
+test("buildRestoreScript: 不得用备份直接覆盖（否则回滚掉第三方新增条目）", () => {
+  const s = buildRestoreScript("C:\\Windows\\System32\\drivers\\etc\\hosts");
+  assert.ok(!s.includes("$bak"), "还原脚本不应引用 *.ghprobe-bak：那是写入前快照，可能含旧块");
+  assert.ok(s.includes("ghprobe begin") && s.includes("ghprobe end"), "缺少剥块标记匹配");
+  assert.ok(s.includes("$skip"), "缺少跳过块内行的状态机：只删标记行会留下孤儿条目");
+  assert.ok(s.includes("[Text.Encoding]::Default"), "读写应用系统 ANSI 编码");
+});
+
+test("buildApplyScript 实跑：刷新备份 + 写入 + 保留写入前内容", { skip: process.platform !== "win32" }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gp-apply-"));
+  const fake = path.join(dir, "hosts");
+  const tmpf = path.join(dir, "new.tmp");
+  const bak = `${fake}.ghprobe-bak`;
+  fs.writeFileSync(fake, "# orig\n1.1.1.1 a.example.com\n");
+  fs.writeFileSync(bak, "# STALE BACKUP from long ago\n");
+  fs.writeFileSync(tmpf, "# orig\n1.1.1.1 a.example.com\n# === ghprobe begin ===\n9.9.9.9 github.com\n# === ghprobe end ===\n");
+  const ps1 = path.join(dir, "apply.ps1");
+  writePs1WithBom(ps1, buildApplyScript(fake, tmpf));
+  try {
+    const r = await runPs1(ps1);
+    assert.equal(r.code, 0, `写入脚本失败: ${r.err}`);
+    assert.ok(fs.readFileSync(fake, "latin1").includes("9.9.9.9 github.com"), "新块未写入");
+    const bakText = fs.readFileSync(bak, "latin1");
+    assert.ok(!bakText.includes("STALE BACKUP"), "备份未刷新，仍是陈旧内容");
+    assert.ok(bakText.includes("1.1.1.1 a.example.com"), "备份应保留写入前的内容");
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  }
+});
+
+test("buildRestoreScript 实跑：剥块 + 保留第三方条目 + 非 ASCII 字节不变", { skip: process.platform !== "win32" }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gp-restore-"));
+  const fake = path.join(dir, "hosts");
+  const GBK_TEST = Buffer.from([0xb2, 0xe2, 0xca, 0xd4]); // "测试" 的 GBK 字节
+  fs.writeFileSync(fake, Buffer.concat([
+    Buffer.from("# Microsoft sample\n", "ascii"),
+    Buffer.from("# third-party note ", "ascii"), GBK_TEST, Buffer.from("\n", "ascii"),
+    Buffer.from("1.1.1.1 third.example.com\n", "ascii"),
+    Buffer.from("# === ghprobe begin ===\n", "ascii"),
+    Buffer.from("20.205.243.166 github.com\n", "ascii"),
+    Buffer.from("# === ghprobe end ===\n", "ascii"),
+    Buffer.from("2.2.2.2 tail.example.com\n", "ascii"),
+  ]));
+  const ps1 = path.join(dir, "restore.ps1");
+  writePs1WithBom(ps1, buildRestoreScript(fake));
+  try {
+    const r = await runPs1(ps1);
+    assert.equal(r.code, 0, `还原脚本失败: ${r.err}`);
+    const buf = fs.readFileSync(fake);
+    const text = buf.toString("latin1");
+    assert.ok(!text.includes("ghprobe begin") && !text.includes("ghprobe end"), "ghprobe 块未被移除");
+    assert.ok(!text.includes("20.205.243.166 github.com"), "块内条目未被移除");
+    assert.ok(text.includes("1.1.1.1 third.example.com"), "第三方条目被误删");
+    assert.ok(text.includes("2.2.2.2 tail.example.com"), "尾部第三方条目被误删");
+    assert.ok(buf.includes(GBK_TEST), "非 ASCII 注释字节被改动（编码未保真）");
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
   }
 });
