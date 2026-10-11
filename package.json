@@ -1,6 +1,6 @@
 {
   "name": "ghprobe",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "GitHub direct-connect optimizer: local DoH resolution + TLS-verified probing + hosts generation (no proxy)",
   "keywords": [
     "github",

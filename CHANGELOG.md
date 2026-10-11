@@ -5,7 +5,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.2] - 2026-10-11
 
 ### Added
 
@@ -198,5 +198,6 @@
 - 提权脚本以 UTF-8 BOM 落盘，杜绝编码解析歧义
 - 写入前校验块标记存在，失败自动回滚；还原时只移除本工具自己的行
 
+[0.1.2]: https://github.com/zmw-zmw/ghprobe/releases/tag/v0.1.2
 [0.1.1]: https://github.com/zmw-zmw/ghprobe/releases/tag/v0.1.1
 [0.1.0]: https://github.com/zmw-zmw/ghprobe/releases/tag/v0.1.0
