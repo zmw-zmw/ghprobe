@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 离线单测：DoH 报文构造与解析（不联网）
 import { test } from "node:test";

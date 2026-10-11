@@ -1,10 +1,11 @@
-ghprobe — GitHub 直连优选：本地 DoH 解析 + TLS 证书终审探测 + hosts 生成（无代理）
+ghprobe
 Copyright (C) 2026 zmw
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+the Free Software Foundation, version 3 of the License.
+
+Version 3 only: the "or any later version" option is intentionally not granted.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -14,8 +15,10 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+Source repository: https://github.com/zmw-zmw/ghprobe
+
 ===============================================================================
-            GNU General Public License — 协议正文（verbatim，未作任何改动）
+                GNU General Public License, Version 3, 29 June 2007
 ===============================================================================
 
                     GNU GENERAL PUBLIC LICENSE
@@ -651,13 +654,13 @@ to attach them to the start of each source file to most effectively
 state the exclusion of warranty; and each file should have at least
 the "copyright" line and a pointer to where the full notice is found.
 
-    <one line to give the program's name and a brief idea of what it does.>
-    Copyright (C) <year>  <name of author>
+    ghprobe - GitHub direct-connect optimizer
+    Copyright (C) 2026 zmw
+    Source repository: https://github.com/zmw-zmw/ghprobe
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+    the Free Software Foundation, version 3 of the License.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -672,7 +675,7 @@ Also add information on how to contact you by electronic and paper mail.
   If the program does terminal interaction, make it output a short
 notice like this when it starts in an interactive mode:
 
-    <program>  Copyright (C) <year>  <name of author>
+    ghprobe  Copyright (C) 2026 zmw
     This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
     This is free software, and you are welcome to redistribute it
     under certain conditions; type `show c' for details.

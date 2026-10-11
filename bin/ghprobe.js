@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // ghprobe CLI：probe / serve / hosts / install / uninstall
 import path from "node:path";
@@ -10,16 +10,20 @@ import { Command } from "commander";
 import { loadConfig } from "../src/config.js";
 import { probeNow, startServer } from "../src/server.js";
 import { runHealth, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
-import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript } from "../src/hosts.js";
+import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-// 健康检查日志写到用户目录，而不是包目录：npm 全局安装时包目录位于 node_modules 下，
+// 健康检查日志写到用户数据目录，而不是包目录：npm 全局安装时包目录位于 node_modules 下，
 // npm 升级/重装会整个换掉，日志放那儿会被清掉。
 function healthLogPath() {
-  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), ".ghprobe");
-  return path.join(base, "ghprobe", "ghprobe.log");
+  return path.join(userDataDir(), "ghprobe.log");
+}
+
+// 无窗口运行包装器（VBScript）的落地路径。计划任务跑的是它，不是 node 本体。
+function hiddenRunnerPath() {
+  return path.join(userDataDir(), "run-hidden.vbs");
 }
 
 // 打印 hosts 块里的 IP 条目（install 完成后回显写入结果）
@@ -111,8 +115,12 @@ program.command("health")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
     const r = await runHealth(cfg, (m) => console.error(m), Boolean(opts.apply));
-    // 计划任务静默运行，stdout/stderr 都丢；每轮结果追加日志文件，跑挂了能查到
-    const entry = `${new Date().toISOString()} health action=${r.action} reason=${r.reason}${r.changed && r.changed.length ? ` changed=${r.changed.join(",")}` : ""}\n`;
+    // 计划任务静默运行，stdout/stderr 都丢；每轮结果追加日志文件，跑挂了能查到。
+    // stuck 单独记：它表示「探测跑了、但这个域名本轮一个活 IP 都没找到，只能保留旧值」——
+    // 只看 action=none 会误以为工具没干活，其实可能是链路整体被黑洞了。
+    const entry = `${new Date().toISOString()} health action=${r.action} reason=${r.reason}`
+      + `${r.changed && r.changed.length ? ` changed=${r.changed.join(",")}` : ""}`
+      + `${r.stuck && r.stuck.length ? ` stuck=${r.stuck.join(",")}` : ""}\n`;
     try {
       const f = healthLogPath();
       fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -129,11 +137,24 @@ program.command("install")
   .option("--skip-probe", "只注册计划任务，不立即探测写 hosts（等下一次定时触发）")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
-    const minutes = cfg.schedule?.healthMin || 5;
+    const minutes = cfg.schedule?.healthMin ?? 1;
     // 包内 bin 与当前 node 的绝对路径：npm 全局安装后二者都指向真实位置，
     // 不依赖计划任务进程的 PATH（highest runlevel 下 PATH 未必含 %APPDATA%\npm）。
     const bin = path.join(ROOT, "bin", "ghprobe.js");
     const cfgArg = opts.config ? ` -c "${opts.config}"` : "";
+
+    // 无窗口运行：Task Scheduler 起 node.exe 必弹控制台窗口，而 node 没有隐藏窗口的开关。
+    // 写一个 VBS 包装器（wscript + WScript.Shell.Run(..., 0, True) = SW_HIDE），任务改成跑它。
+    // 写失败不阻断安装：退回直接跑 node，功能一样，只是会闪一下窗口。
+    let vbsPath = "";
+    try {
+      const v = hiddenRunnerPath();
+      fs.mkdirSync(path.dirname(v), { recursive: true });
+      fs.writeFileSync(v, buildHiddenRunnerVbs(process.execPath, bin, `health --apply${cfgArg}`), "ascii");
+      vbsPath = v;
+    } catch (e) {
+      console.error(`无窗口包装器写入失败（退回直接运行，可能会闪一下窗口）: ${e.message}`);
+    }
 
     // 用 runHealth 的保守决策（只预览、不写）来算该写什么：
     // 它会先测 hosts 里已写入的 IP，健康的保留，只有确认失效的才重排。
@@ -154,7 +175,7 @@ program.command("install")
       // RunLevel Highest：任务以管理员权限静默运行，applyHosts 不再额外弹 UAC
       // UserId 必须用 COMPUTERNAME\USERNAME（裸用户名非合法 UserId，会 E_INVALIDARG）
       const res = await runElevated(buildInstallScript({
-        hostsPath: WIN_HOSTS, tmpPath: tmp, nodePath: process.execPath, binPath: bin, cfgArg, minutes, writeHosts,
+        hostsPath: WIN_HOSTS, tmpPath: tmp, nodePath: process.execPath, binPath: bin, cfgArg, minutes, writeHosts, vbsPath,
       }));
       if (res.code !== 0) { console.error(`安装失败: ${res.err || res.out}`); process.exitCode = 1; return; }
     } catch (e) {
@@ -165,7 +186,7 @@ program.command("install")
       try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
     }
 
-    console.log(`计划任务 ghprobe 已注册：每 ${minutes} 分钟健康检查（health --apply，runlevel=highest）`);
+    console.log(`计划任务 ghprobe 已注册：每 ${minutes} 分钟健康检查（health --apply，runlevel=highest，无窗口）`);
     if (opts.skipProbe) { console.log("未写 hosts（--skip-probe）；下一次定时到点会自动处理。"); return; }
     if (merged == null) { console.log("hosts 未改动（现有条目仍然健康）。"); return; }
     console.log("hosts 已写入 ✓");
@@ -194,6 +215,8 @@ program.command("uninstall")
       console.error(`删除计划任务失败: ${e.message}`);
       process.exitCode = 1;
     }
+    // 包装器是 ghprobe 自己生成的临时产物，顺手清掉（删不掉也不影响，下次 install 会覆盖）
+    try { fs.unlinkSync(hiddenRunnerPath()); } catch { /* 不存在就算了 */ }
   });
 
 program.parseAsync();

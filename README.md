@@ -2,141 +2,292 @@
 
 [English](README.en.md) | 简体中文
 
-你自己的网络，你自己测——GitHub 直连 hosts，本地自动探测、自动更新、无代理依赖。
+**为 GitHub 直连加速的 Windows 命令行工具：在你自己的网络里测出「当前真正能用的 IP」，写进 hosts，并在 IP 失效时自动换掉。不装代理、不改系统代理、不劫持流量。**
 
-## 这是什么
+它解决的问题很具体：GitHub 直连时快时慢、`git clone` / `git push` 卡死，网上抄来的 hosts 是一份没人维护的静态快照，IP 死了也没人知道。ghprobe 把「找可用 IP」这件事放到本地、自动化、并带自愈。
 
-国内访问 GitHub 的故障不只在 DNS：主机名级 SNI 黑名单（如 raw 被精确 RST）、优质解析端点被整段封锁，且特征组合随地区/ISP/时刻漂移。中心化发布的静态 hosts 列表必然滞后。
+- 仅支持 **Windows**（写系统 hosts、UAC 提权、注册计划任务都是 Windows 专有能力）
+- 只改 **hosts 文件**，不安装任何代理 / 驱动 / 服务
+- 运行需要 **Node.js ≥ 18**
+- 许可证 **GPL-3.0-only**，作者 **zmw**，仓库 <https://github.com/zmw-zmw/ghprobe>
 
-ghprobe 把探测下放到你本地：
+---
 
-1. **DoH 联邦取候选**——全部走 DoH（无 UDP53 路径），默认国内实测可达端点，另合并内置 IP 池
-2. **三关探测**——TCP RTT -> TLS 握手 + 证书域名校验 -> HTTP 应用层终审
-3. **排名写 hosts**——每域名取最快可用 IP，提权写入系统 hosts（自动备份），git/浏览器即刻直连
-4. **兜底链**——主域名候选全灭时自动探测替身域名（如 raw 走 jsdelivr）
-5. **定时健康检查**——计划任务每 5 分钟测已写入 IP，异常才全量重排换 IP（不是无脑定时重跑）
+## 1. 项目介绍
 
-不提供任何代理/隧道/流量转发/协议对抗；仅在运营商正常信道内优选可直连节点。
+### 它到底做了什么
 
-## 原理图
+一句话：**ghprobe 用本地探测挑出 GitHub 相关域名当前最快、最可用的 IP，写成一份会自我维护的 hosts 块。**
 
-```mermaid
-flowchart LR
-    A[配置 domains + DoH 端点 + IP 池] --> B{并发 DoH 查询}
-    B --> C[候选 IP 列表]
-    C --> D{三关探测}
-    D --> D1[TCP RTT]
-    D --> D2[TLS 证书域名校审]
-    D --> D3[HTTP 真实业务路径 + 状态码 + 内容 + 跳转白名单终审]
-    D1 --> E{全部通过?}
-    D2 --> E
-    D3 --> E
-    E -->|是| F[按延迟排名]
-    E -->|否| G[标记失败]
-    F --> H{主域名有活 IP?}
-    H -->|是| I[生成 hosts 块]
-    H -->|否| J[探测兜底域名]
-    J --> I
-    I --> K[UAC 提权写入 hosts<br/>备份原文件 + 刷 DNS 缓存]
+一轮完整流程是：本地 DoH 解析拿候选 IP → 对每个候选跑「三关探测」→ 按延迟排名 → 每域名取最优一条写进 hosts。之后由计划任务定时做健康检查，IP 死了就自动重排换新 IP。
+
+它**不**提供代理、隧道、流量转发或协议对抗，也**不**试图「突破」什么；只在链路本身可达的前提下做三件事：**优选 IP、剔除假活节点、IP 失效时自动替换**。
+
+### 核心技术点
+
+**① 本地 DoH 解析，绕开系统 DNS 污染**
+
+候选 IP 不来自系统 DNS（可能被污染），而是走 DoH（RFC 8484 wire format，全程无 UDP/53 路径）。默认使用国内实测可达的端点：阿里 DNS（`223.5.5.5` / `223.6.6.6`）和 DNSPod（`1.12.12.12`）。
+
+关键细节：**DoH 端点用 IP 直连 + SNI 校验**。如果连 DoH 端点本身都要先解析它的域名，就会掉进「解析 DoH 域名又要先解析」的死锁；所以配置里端点写的是 IP，同时用 `sni` 字段填服务域名做证书校验（RFC 6066 不允许拿 IP 当 SNI），例如：
+
+```yaml
+doh:
+  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
+  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
+  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
 ```
 
-**三关探测细节：**
+多个端点并发查询，成功者取并集去重，再用内置 IP 池补一批候选。
 
-- **TCP RTT**：建立 443 端口连接，量基础网络延迟
-- **TLS 证书域名校审**：证书 SAN 必须含目标域名，DNS 污染无法伪造有效证书
-- **HTTP 应用层终审**：发送带 `Host: 域名` 的真实 GET，使用**真实业务路径**（如 `codeload.github.com` 直接请求归档下载路径，不是根路径），校验：
-  - 状态码不在允许列表（5xx 直接判死）
-  - 响应体含 `unknown domain` / `Fastly error` 等错误特征
-  - 响应体缺失该域名必须包含的特征（如 `github.com` 需含 `github`）
-  - 3xx 跳转目标不在该域名的白名单（如 `codeload.github.com` 坏节点会 302 回 `github.com` 主站，会被拦截）
+**② 三关探测：只有三关全过才算「活」**
 
-  共享 CDN（如 Fastly）可能给 `github.com` 返回合法证书但错误页面；`codeload.github.com` 根路径可能 301 跳回主站但归档路径并不可用。这一关把这类"假活"IP 过滤掉。
+对每个 `(域名, 候选 IP)` 依次跑：
 
-## 快速开始
+1. **TCP RTT** —— 在 443 端口建连，量基础网络延迟。
+2. **TLS 握手 + 证书 SAN 校验** —— `rejectUnauthorized: true`，且 `servername` 传的是目标域名（SNI）。证书里必须包含目标域名，DNS 污染伪造不出合法证书。
+3. **HTTP 应用层终审** —— 带 `Host: <域名>` 发一个真实业务路径的 `GET`，读回少量响应体做校验：状态码是否在允许列表、响应体是否含错误特征、是否含该域名必须出现的特征、3xx 跳转目标是否在白名单内。
 
-要求 Node.js >= 18。
+**为什么必须有第 3 关？** 因为第 2 关的证书校验挡不住「共享 CDN 上的假活 IP」。举例：Fastly 的 `185.199.x.x` 这类共享节点，会对 `github.com` 返回一张**完全合法**的证书（证书 SAN 确实匹配），但 HTTP 响应体是 `Fastly error: unknown domain` —— 这个 IP 根本没有为 `github.com` 提供服务。只做证书校验就会把这种「假活 IP」当成好节点写进 hosts，结果是 hosts 看着写成功了、GitHub 反而更连不上。第 3 关按**真实业务路径**和**响应内容**做终审，才能把它拦下来（同理，`codeload.github.com` 的根路径可能 301 跳回主站，所以探测用的是归档下载路径，不是根路径）。
 
-> **平台支持：Windows。** 写系统 hosts、UAC 提权、注册计划任务都是 Windows 专有能力。
-> 探测 / 排名 / DoH / HTTP API 等核心逻辑本身跨平台（CI 也在 ubuntu 上跑这部分），
-> 在 Linux/macOS 上可以跑 `probe` 看结果，但**不会**（也无法）写系统 hosts。
+**③ 无代理**
 
-### 方式一：npm 安装（推荐）
+只写 hosts 文件。不装代理软件、不改系统代理设置、不装驱动、不劫持系统流量。卸载时把 hosts 里属于 ghprobe 的那一块剥掉即可，不留残渣。
+
+**④ 故障分层认知（这是本项目的价值主张）**
+
+GitHub 连不上，原因不在同一层，能修的手段也不同：
+
+| 故障层 | 现象 | 能否靠「换 IP」修好 |
+| --- | --- | --- |
+| **DNS 污染** | 解析到错误 / 不可达 IP | ✅ 能。换一个正确 IP 即可 |
+| **SNI 主机名黑名单** | 主机名本身被封锁，TLS 握手里的 SNI 就带着被封锁的域名 | ❌ 不能。换任何 IP 都没用，只能**换域名**兜底 |
+| **IP 黑洞** | 某些 IP 段被整段丢弃 | ✅ 能。换到可用段即可 |
+
+很多工具/教程只处理第一层，遇到第二层（如 `raw.githubusercontent.com` 被精确 RST）就束手无策。ghprobe 对第二层有专门的**兜底链**机制（见第 5 节），把「换 IP 修不了」的情况单独处理。
+
+---
+
+## 2. 解决的痛点
+
+**痛点一：裸连 GitHub 时快时慢、时通时断**
+
+`git clone` 卡在 `Receiving objects`、`git push` 超时、网页转圈 —— 同一个仓库、同一个网络，早上能拉、晚上拉不动。因为 GitHub 各域名的可用 IP 随地区、ISP、时段漂移，系统 DNS 给的地址经常是慢的甚至不通的。
+
+**痛点二：抄来的 hosts 是一份静态快照**
+
+网上找的「GitHub hosts 加速」列表，是某个人在某个时间点测出来的一份快照。IP 死了没人知道，更不会自动换。你改一次、管几天，之后又不行了，只能再去找新的 —— 本质上是在手动维护一份注定过期的表。
+
+**痛点三：很多工具要装代理 / 改系统代理 / 装驱动**
+
+为了加速 GitHub，被要求装一堆东西：代理客户端、系统代理开关、TUN/TAP 驱动、后台服务……重、脏，还可能影响浏览器、IDE、其它软件的联网行为。你只是想让 `git clone` 快一点，不想让整个系统的网络路径被改写。
+
+**痛点四：手动 `ping` / `curl` 挑 IP 靠感觉，挑出来的可能是「假活」**
+
+手动 `ping` 只能证明 IP 通不通，证明不了这个 IP 是否真的为 GitHub 服务。共享 CDN 节点会回你一个合法的 TLS 证书，但 HTTP 层面告诉你 `unknown domain` —— 你 ping 着「通」，写进 hosts 却发现 GitHub 更连不上。凭感觉挑 IP，很容易踩这种坑。
+
+**痛点五：开机后 GitHub 突然连不上，只能自己去翻 IP**
+
+IP 失效往往发生在你毫无察觉的时候。没有自动检查，就只能等「哪天用不了」才发现，然后再手动去翻。ghprobe 用计划任务定时自愈：平时静默待命，发现已写入的 IP 失效就自动重排换新，不需要你盯着。
+
+---
+
+## 3. 工作原理
+
+### 整体流程
+
+```
+                        ┌─────────────────────────────────────┐
+                        │  配置: domains + DoH 端点 + IP 池    │
+                        └──────────────────┬──────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  本地 DoH 联邦解析（并发，IP 直连）│  ← 绕开系统 DNS 污染
+                          │  + 内置 IP 池 → 候选 IP 列表       │
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │            三关探测              │
+                          │  ① TCP RTT                       │
+                          │  ② TLS 握手 + 证书 SAN 校验       │  ← 拦 DNS 污染
+                          │  ③ HTTP 应用层终审                │  ← 拦共享 CDN 假活 IP
+                          └────────────────┬────────────────┘
+                                           │
+                            三关全过? ──否──▶ 标记失败，丢弃
+                                           │是
+                          ┌────────────────▼────────────────┐
+                          │  按 score 升序排名，每域名取最优  │
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  主域名有活 IP? ──否──▶ 探测兜底域名 │  ← 换域名救 SNI 层封锁
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  生成 hosts 块（每域名 1 条）      │
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  UAC 提权写入 hosts + 刷 DNS 缓存  │
+                          │  写入前跑「全灭护栏」              │
+                          └─────────────────────────────────┘
+```
+
+### 三条命令路径的关系
+
+ghprobe 的核心逻辑只有一套（DoH → 三关探测 → 排名），但通过三条不同的命令路径使用：
+
+- **`ghprobe probe`** —— 跑一轮完整探测，**不写 hosts**（加 `--apply` 才写）。适合先看看当前网络能测出什么。
+- **`ghprobe health`** —— 健康检查：**只测 hosts 里已经写入的那批 IP**。全健康就静默退出、不动 hosts；只有发现异常才触发全量重排、换 IP。这是计划任务实际调用的命令。
+- **`ghprobe install`** —— 一键开启：先做一次健康检查式的保守探测，再在**一次 UAC** 里同时完成「写 hosts」和「注册计划任务（定时调用 `health --apply`）」。
+
+三者写 hosts 时共用同一套规则（同一份块格式、同一道全灭护栏），因此手动 `probe --apply` 和计划任务 `health --apply` 不会互相踩。
+
+### 调度模型：哨兵 + 异常才全量重排
+
+固定频率「每隔 N 小时全量重跑」是错配：网络好时白测，坏时反应太慢。ghprobe 用**分层**替代：
+
+- **哨兵层（默认每 1 分钟）**：一次 `health` 只并发探测 hosts 块里**已写入的那几条 IP**（`probe.concurrency` 条并发），一轮通常 <2 秒。全健康就静默退出，不碰 hosts。
+- **重炮层（异常才触发）**：只有确认已有 IP 失效，才跑全量探测（DoH 重解析 + 全部候选三关）。
+
+哨兵间隔由 `schedule.healthMin` 决定，默认 **1 分钟**（也是 Windows Task Scheduler 重复间隔的下限）。它是「IP 死了 → 自动换掉」的**最坏等待时间**。
+
+### 抗抖动与安全设计
+
+- **横向判据（全灭才算断网）**：只有当**已写入的 IP 全部失败**且条目数 ≥ 2 时，才判定为网络级故障（黑洞窗口），本轮什么都不动。只要还有**任意一条健康**，就说明链路是通的，失败的那些是 IP 陈旧 / 真死，触发重排换 IP。（早期的「多数失败即放弃」判据被证实会误触发：分母只数已写入条目、常低到 3~4，会把「3 条陈旧 + 1 条健康」误判成断网，该修的时候不修。）
+- **全灭护栏**：写入前若新块**一条有效 IP 都没有**、而 hosts 里还有旧条目，则**拒绝写入、保留旧条目**。避免网络抖动的那几十秒里把原本可用的映射一起抹掉。`probe --apply` 与 `health --apply` 共用这道护栏。
+- **部分更新 + IP 粘性**：全量重排后，只更新与当前 hosts **确实不同**的域名；健康域名的 score 微小抖动不会触发换 IP（每次换 IP 都要刷 DNS 缓存、让连接池失效，代价不低）。
+- **`# absent` 冷却**：配置里有、hosts 里没有的域名（典型是被 SNI 层封锁、全量也救不回的域名）会记入 hosts 块内的 `# absent <域名> <时间戳>` 注释，冷却 `schedule.absentCooldownHours`（默认 1 小时）内不再重试，避免重炮每分钟空响。
+- **无状态**：`# absent` 冷却表直接编码在 hosts 块注释里，跨进程、跨重启都不丢，不需要额外的状态文件。
+- **跨进程写锁**：`probe --apply` 与计划任务可能并发写 hosts，用锁文件串行化，避免读-改-写互相覆盖；抢不到锁就本轮跳过，下一轮健康检查会自动补写。
+
+### hosts 块长这样
+
+```text
+# === ghprobe begin ===
+# generated 2026-10-11T00:00:00.000Z by ghprobe
+140.82.112.3 github.com
+20.27.177.113 codeload.github.com
+185.199.108.133 raw.githubusercontent.com
+# absent gist.githubusercontent.com 2026-10-11T00:00:00.000Z
+# === ghprobe end ===
+```
+
+`# === ghprobe begin/end ===` 之间归 ghprobe 管，重复写入只替换块内内容；**块外的行（包括你自己的 hosts 条目和第三方工具写的）永远不会被改动**。Windows 对同一域名只认 hosts 里第一条，所以每个域名只写最优的一条。
+
+---
+
+## 4. 如何使用
+
+> 平台：**Windows**；前置：**Node.js ≥ 18**。所有命令在 **PowerShell 或 cmd** 里执行。
+
+### 方式一：npm 全局安装（推荐）
 
 ```bash
 npm install -g ghprobe
 ```
 
-之后在 **PowerShell 或 cmd** 里，两条命令搞定：
+装好后，两条命令即可：
 
 ```bash
 ghprobe install     # 开启：探测并写入 hosts + 注册计划任务（全程只弹一次 UAC）
 ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 ```
 
-开启后就不用再敲命令了：每 5 分钟自动健康检查，IP 陈旧时自动重排。
+**`ghprobe install` 做了什么：**
+
+1. 先做一次**健康检查式的保守探测**：只测 hosts 里已写入的 IP，健康的保留、确认失效的才重排（不会把「本轮没抓到、但现有 IP 仍然健康」的域名误记成缺失）。
+2. 弹出**一次 UAC**，在同一个管理员会话里完成两件事：
+   - **写一次 hosts**：先把当前 hosts 备份为 `hosts.ghprobe-bak`，写入 ghprobe 块，校验块标记存在，失败自动回滚，成功则刷新 DNS 缓存。
+   - **注册名为 `ghprobe` 的 Windows 计划任务**：以**最高权限（RunLevel=Highest）静默运行**（后续写入不再弹 UAC），按 `schedule.healthMin`（默认 1 分钟）的间隔执行 `health --apply`。任务动作经一个隐藏窗口包装器启动，**无窗口**，不打扰你。
+
+   装完即用，此后不用再敲命令。
+
+**`ghprobe uninstall` 做了什么：**
+
+1. **还原 hosts**：把 ghprobe 的整块内容**剥掉**后写回 —— 只删 ghprobe 自己的行，**第三方条目一律保留**（刻意不用 `hosts.ghprobe-bak` 直接覆盖：那份备份是「写入前」的快照，直接覆盖会连带回滚后来由别的软件追加的条目），最后刷 DNS 缓存。
+2. **删除计划任务**：`Unregister-ScheduledTask ghprobe`；任务本就不存在时幂等跳过。
+
+   两步互相独立，任一步失败不影响另一步，失败时以非零退出码结束。
 
 > 包尚未发布到 npm 时，可在仓库目录执行 `npm install -g .` 达到同样效果。
 
 ### 方式二：克隆仓库一键部署
 
-双击 `install.cmd`，或在 PowerShell 里执行：
+```bash
+git clone https://github.com/zmw-zmw/ghprobe
+cd ghprobe
+```
+
+然后双击 `install.cmd`，或在 PowerShell 里执行：
 
 ```powershell
 .\install.ps1
 ```
 
-它会：自提权（**全程只弹一次 UAC**）→ 检查 Node 版本 → 安装依赖 → 注册计划任务 → 立即写入一次 hosts → **自检并把结果打回当前窗口**。装完即用；此后每 5 分钟自动健康检查，IP 陈旧时自动重排。
+`install.ps1` 会：自提权（**全程只弹一次 UAC**）→ 检查 Node 版本（≥ 18）→ 安装依赖 → 注册计划任务 → 立即写入一次 hosts → **自检并把结果打回当前窗口**。
+
+可用开关：
 
 ```powershell
-.\install.ps1 -SkipProbe    # 只注册计划任务，等首轮健康检查自己写 hosts
-.\install.ps1 -Uninstall    # 卸载：删除计划任务并还原 hosts
+.\install.ps1                 # 部署：注册计划任务 + 立即写一次 hosts
+.\install.ps1 -SkipProbe      # 只注册计划任务，等首轮健康检查自己写 hosts
+.\install.ps1 -Uninstall      # 卸载：删除计划任务 + 还原 hosts
 ```
 
-> 部署链路只依赖 Node.js 与仓库自身源码，不含任何闭源组件。
-> 若你通过远程桌面/向日葵操作本机，注意 **UAC 弹窗走的是安全桌面，远程画面里可能看不到** —— 请在物理机前执行，或改用「以管理员身份运行」的终端。
+> `install.ps1` 还支持 `-LogFile <path>` 指定部署日志路径（默认 `%TEMP%\ghprobe-deploy.log`）；`-Inner` 是脚本内部自提权用的，不用手动传。
+> `install.cmd` 只是 `install.ps1` 的 cmd 包装（等价，双击即用）。
 
-### 手动命令
+### 其它命令
 
 ```bash
-# 1. 跑一轮探测，看结果（不动系统）
-node bin/ghprobe.js probe
+# 跑一轮探测并打印结果（不写 hosts）
+ghprobe probe
+ghprobe probe -j            # 以 JSON 输出（便于脚本消费）
+ghprobe probe --apply       # 探测后写入系统 hosts（会弹 UAC，自动备份）
 
-# 2. 跑一轮并写入系统 hosts（弹 UAC，原 hosts 自动备份为 *.ghprobe-bak）
-node bin/ghprobe.js probe --apply
+# 只生成 hosts 块文本并打印，你自己决定是否写入
+ghprobe hosts
 
-# 3. 只生成 hosts 块文本，自己决定是否写入
-node bin/ghprobe.js hosts
+# 手动做一次健康检查（默认不写 hosts；检测到异常只预览）
+ghprobe health
+ghprobe health --apply      # 检测到异常时写入系统 hosts（会弹 UAC）
 
-# 4. 注册计划任务：每 5 分钟健康检查，异常才全量换 IP（runlevel=highest，静默提权）
-node bin/ghprobe.js install
+# 本地 HTTP API（默认 127.0.0.1:8930）
+ghprobe serve
+#   POST /api/probe    立即触发一轮探测，返回摘要
+#   GET  /api/status   最近一轮结果
+#   GET  /api/hosts    当前生成的 hosts 块
+#   GET  /api/config   当前生效的配置
 
-# 5. 手动做一次健康检查（不写 hosts，异常只预览；加 --apply 才写）
-node bin/ghprobe.js health
-
-# 6. 删除计划任务并还原 hosts
-node bin/ghprobe.js uninstall
-
-# 7. 本地 API（默认 127.0.0.1:8930）
-node bin/ghprobe.js serve
-#   POST /api/probe   触发探测
-#   GET  /api/status  最近结果
-#   GET  /api/hosts   生成的 hosts 块
-#   GET  /api/config  当前配置
+# 所有命令都支持 -c / --config 指定用户配置覆盖
+ghprobe probe -c my.yaml
 ```
 
-> 仓库尚未发布到 npm，因此上面用 `node bin/ghprobe.js`；`package.json` 已声明 `bin`，发布后 `npx ghprobe` 等价。
+### 配置覆盖
 
-## 配置
-
-默认配置内置（`config.default.yaml`），可用 `-c my.yaml` 覆盖。对象属性（如 `timeouts`/`probe`/`serve`）会递归合并，你只需写想改的子键：
+默认配置内置在 `config.default.yaml`。用 `-c my.yaml` 传入一个**只写你想改的部分**的 YAML 即可：对象属性（如 `timeouts` / `probe` / `serve` / `schedule`）是**递归合并**的，你只需写要改的子键。
 
 ```yaml
-# 只把 tls 超时改成 3s，dohMs/httpMs 保持默认
+# 例 1：只把 TLS 超时改成 3 秒，dohMs / httpMs 保持默认
 timeouts:
   tlsMs: 3000
+
+# 例 2：把哨兵间隔改成 5 分钟
+schedule:
+  healthMin: 5
+
+# 例 3：换一批 DoH 端点（注意 host 填 IP、sni 填服务域名）
+doh:
+  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
+
+# 例 4：调整目标域名清单
+domains:
+  - github.com
+  - raw.githubusercontent.com
 ```
 
-完整配置示例：
+完整的默认配置（键名与默认值，均与代码一致）：
 
 ```yaml
 domains:
@@ -147,18 +298,15 @@ domains:
   - gist.githubusercontent.com
   - avatars.githubusercontent.com
 
-# DoH 端点（IP 直连，sni 填服务域名用于证书校验）
 doh:
   - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
   - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
-  - { name: dnspod, host: 1.12.12.12, sni: doh.pub, path: /dns-query }
+  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
 
-# 内置候选 IP 池：与域名无关地全量进候选，由 TLS 证书 + 应用层终审共同分流
 ipPools:
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
   azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
 
-# 兜底链：主域名全灭时改探测这些替身域名
 fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
@@ -166,53 +314,117 @@ timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
 probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
 serve: { host: 127.0.0.1, port: 8930 }
 schedule:
-  healthMin: 5            # 哨兵间隔（分钟）：只测已写入 IP，异常才触发全量
+  healthMin: 1            # 哨兵间隔（分钟）：只测已写入 IP，异常才触发全量
   absentCooldownHours: 1  # 缺失域名冷却（小时）：SNI 层封锁的域名全量也救不回，冷却内不重试
 ```
 
-## 设计细节
+### 卸载 / 回滚与日志
 
-- **为什么需要应用层终审**：TLS 证书能防 DNS 污染，但防不住共享 CDN 上未部署目标域名的"假活"IP。实测 Fastly 某些节点给 `github.com` 返回合法证书但 `Fastly error: unknown domain` 错误页，因此第三关必须校验 HTTP 状态码和响应特征
-- **内置池为何不按域名分**：池子与域名无关地全量进候选，由证书 + 应用层终审自然分流。简单且不怕 GitHub 换 CDN
-- **hosts 块有标记**：`# === ghprobe begin/end ===` 之间的内容归本工具管，重复 apply 只替换块内内容，用户自己的条目永不动
-- **每域名只写一条**：Windows 对同一域名在 hosts 里只认第一条，因此 ghprobe 只把每个域名最优 IP 写进 hosts。排名里的"备选"只用于展示，不写入
-- **写入是事务化的**：先刷新备份 -> 覆盖 -> 校验块标记存在 -> 失败则回滚 -> 刷 DNS 缓存
-- **备份每次刷新**：`*.ghprobe-bak` 在每次写入前重新生成（不是「只建一次」）——只建一次时，若 hosts 在安装后被第三方追加了条目，那份陈旧备份里没有它们，回滚会把它们一起抹掉
-- **uninstall 还原 hosts**：两步互相独立（任一步失败不影响另一步，最终以非零退出码结束）。先还原 hosts —— **剥掉 ghprobe 块**后写回（不直接用 `*.ghprobe-bak` 覆盖：那份备份是「写入前」的快照，直接覆盖会连带回滚第三方后来追加的条目）；再删计划任务 —— 任务建在根目录且以最高权限运行，非提权删会「拒绝访问」，故与 install 一样走自提权，任务本就不存在时幂等跳过
-- **全灭护栏**：写入前若新块一条有效 IP 都没有、而 hosts 里仍有旧条目，则拒绝写入并保留旧条目（`probe --apply` 与 `health --apply` 共用同一判据）——避免网络抖动时把原本可用的映射一起抹掉
+```bash
+ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自己的行）
+```
 
-### 调度架构
+如果你是用 `install.ps1` 部署的，也可以用 `.\install.ps1 -Uninstall`。
 
-网络有波动，固定频率的"每隔 N 小时全量重跑"是错配：网络好时白测、坏时反应太慢。ghprobe 用**分层健康检查**替代：
+- **手动回滚 hosts**：写入前会备份到 `C:\Windows\System32\drivers\etc\hosts.ghprobe-bak`；但更推荐用 `ghprobe uninstall`（它按块剥离，不会误伤第三方后来追加的条目）。
+- **健康检查日志**：`%LOCALAPPDATA%\ghprobe\ghprobe.log`。计划任务静默运行、stdout/stderr 都被丢弃，所以每轮结果会追加到这里（含 `action` / `reason` / `changed`），跑挂了能查。
+- **部署日志**：用 `install.ps1` 时默认写到 `%TEMP%\ghprobe-deploy.log`。
 
-- **哨兵层（每 5 分钟）**：一次 `ghprobe health` 只并发探测 hosts 块里**已写入的那批 IP**，一轮 <2 秒。全健康就静默退出，不动 hosts。
-- **重炮层（异常才触发）**：只有确认已有 IP 失效，才跑完整全量探测（DoH 重解析 + 全候选三关）。
+---
 
-关键抗抖动与安全设计：
+## 5. 关于「为什么还会出现 cdn.jsdelivr.net」
 
-- **横向判据**：只有当**所有**已写入 IP 同时失败（且条目数 ≥ 2）时才判定为网络故障（黑洞窗口），本轮不动——不写空块、不误杀好 IP。只要还有**任意一条健康**，就说明链路是通的，失败的那些就是 IP 陈旧/真死，触发重排换 IP。
-- **全灭护栏**：全量探测后若某域名仍无活 IP，保留旧条目不动，绝不会写成空块把好 IP 一起抹掉。网络几十秒自愈后原 IP 仍在。
-- **部分更新 + IP 粘性**：全量重排后，只更新与当前 hosts 不同的域名；健康域名的 score 微小抖动不会触发换 IP（每次换 IP 代价是刷 DNS 缓存 + 连接池失效）。
-- **缺失域名覆盖**：配置里有、hosts 里没有的域名（如 SNI 层封锁的 raw）也算"不健康"，会触发全量重试；但全量也救不回的域名会记入 `# absent` 冷却 1 小时，避免重炮每 5 分钟空响。
-- **无状态文件**：缺失冷却表直接编码进 hosts 块注释，跨进程、跨重启不丢，无需额外状态文件。
+有用户问：**「我这个是专门为 GitHub 加速的，其它国内镜像为什么要加速？」**
 
-`install` 注册的计划任务以 `runlevel=highest` 运行，apply 提权静默完成，不弹 UAC；手动跑 `health --apply` 时才会弹。
+先把措辞说准：**`cdn.jsdelivr.net` 不是「国内镜像」**。它是 jsDelivr 的 CDN（走 Cloudflare），是一个全球性的公共 CDN，跟「国内镜像站」是两回事。
 
-## 已知边界
+它为什么会出现在 hosts 里？**唯一原因是兜底链**。
 
-- 工具只能找到**当前网络、当前时刻**可用的 IP；ISP/地区/时刻变了结果会变，因此需要定时重跑
-- 如果所有候选 IP 都不可用，工具会命中兜底链或触发全灭护栏（保留旧 IP 不写空块），不会硬塞错误 IP
-- Windows hosts 单域名多 IP 不轮询，所以 ghprobe 每个域名只写一条最优记录
-- **单 IP 无故障转移**：每域名只写一条最优 IP，若该 IP 在两次健康检查之间失效，最坏中断时长 = `schedule.healthMin`（默认 5 分钟）。这是 hosts 机制本身的限制，不是能靠探测规避的
-- **计划任务锁屏不运行**：`install` 注册的任务 `LogonType` 为 `Interactive`，锁屏/注销/未登录状态下不会触发，登录后按间隔继续
+回顾第 1 节的故障分层：有一种故障叫 **SNI 主机名黑名单** —— 被封锁的是**主机名本身**。这时 TLS 握手里的 SNI 就带着那个被封锁的域名，**换任何 IP 都没用**：你换到天涯海角的 IP，握手时客户端照样要说出被封锁的域名，一样被掐断。这种情况下，唯一的出路是**换域名**去取同一份内容。
 
-## 免责声明
+jsDelivr 提供了一个直接把 GitHub 仓库文件映射出来的路径：
 
-本工具仅做 DNS 优选与连通性探测，不提供、不包含、不协助任何代理、隧道、流量转发或网络管控对抗能力。使用本工具产生的一切后果由使用者自行承担。请遵守你所在地区的法律法规。
+```text
+https://cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>
+```
+
+也就是说，`raw.githubusercontent.com/<user>/<repo>/<ref>/<path>` 上的那份文件内容，可以从 `cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>` 拿到 —— 这是「同一份内容的另一个可访问入口」。所以当 `raw.githubusercontent.com` 被 SNI 层封锁、主候选全灭时，ghprobe 会用 jsDelivr 作为**兜底入口**，保证这类文件至少有一条路可走。
+
+**几个必须说清楚的前提：**
+
+- **默认配置里只有 `raw.githubusercontent.com` 配了这条兜底**：
+
+  ```yaml
+  fallbacks:
+    raw.githubusercontent.com: [cdn.jsdelivr.net]
+  ```
+
+- **主域名 `github.com` / `codeload.github.com` 从不走兜底**。它们只在官方域名族里选 IP。
+- **兜底只在主候选「全灭」时才触发**。主域名只要有任何一条活 IP，就不会去探兜底域名。
+- 兜底命中后，写入的是**兜底域名的 IP**（即 `cdn.jsdelivr.net` 的 IP），不是 `raw.githubusercontent.com` 的 —— 因为这时候要救的是「换域名」而不是「换 IP」。
+
+**如果你不想要这个兜底**，完全可以去掉：
+
+- 编辑 `config.default.yaml`，把 `fallbacks` 段清空：
+
+  ```yaml
+  fallbacks: {}
+  ```
+
+- 或者用自己的 `--config` 覆盖（对象是递归合并的，`fallbacks` 直接给空对象即可）：
+
+  ```yaml
+  fallbacks: {}
+  ```
+
+  ```bash
+  ghprobe install -c my.yaml
+  ```
+
+去掉之后，工具就**完全只用 GitHub 官方域名**。代价是：一旦 `raw.githubusercontent.com` 被 SNI 层封锁，这一类文件将没有任何替代入口（这属于该网络环境的客观限制，不是工具能绕过的）。
+
+---
+
+## 6. 系统要求与常见问题
+
+### 系统要求
+
+- **操作系统：Windows**。写系统 hosts、UAC 提权、注册计划任务都是 Windows 专有能力。
+  （探测 / 排名 / DoH / HTTP API 等核心逻辑本身跨平台，CI 也在 ubuntu 上跑这部分；但在 Linux/macOS 上跑 `probe` 只能看结果，**不会也无法**写系统 hosts。）
+- **Node.js ≥ 18**。
+- 首次安装需要管理员权限（一次 UAC）。
+
+### 常见问题
+
+**Q：为什么需要管理员权限？**
+系统 hosts 文件（`C:\Windows\System32\drivers\etc\hosts`）只有管理员能写；注册以最高权限运行的计划任务也需要管理员。`ghprobe install` 把「写 hosts」和「注册任务」合并进**同一次 UAC**，所以全程只弹一次。
+
+**Q：为什么有时候修不好？**
+工具只能找到**当前网络、当前时刻**可用的 IP。如果遇到的是 SNI 主机名黑名单（换 IP 修不了）或 IP 黑洞，可能所有候选都不可用。此时会命中兜底链（如果配了），或者触发全灭护栏 —— **保留旧 IP、不写空块**，绝不会硬塞一个错误 IP 进去。
+
+**Q：会不会影响别的软件？**
+不会。它**只写 hosts 文件**，不装代理、不改系统代理设置、不劫持流量。而且只操作 `# === ghprobe begin/end ===` 之间属于它自己的那一块，**你原有的 hosts 条目和第三方工具写的条目都不会被改动**；卸载时也只剥掉自己的块。
+
+**Q：为什么每个域名只写一条 IP？**
+Windows 对同一域名在 hosts 里只认第一条，写多条也不会轮询。所以 ghprobe 每个域名只写最优的一条；排名里的「备选」仅用于展示，不写入。
+
+**Q：两次健康检查之间 IP 失效了怎么办？**
+每域名只写一条 IP，若它在两次检查之间失效，最坏中断时长 ≈ `schedule.healthMin`（默认 1 分钟）。这是 hosts 机制本身的限制，不是探测能规避的。
+
+**Q：计划任务锁屏时会跑吗？**
+`install` 注册的任务 `LogonType` 为 `Interactive`，锁屏 / 注销 / 未登录状态下不会触发，登录后按间隔继续。
+
+### 免责声明
+
+本工具仅做 DNS 优选与连通性探测，**不提供、不包含、不协助**任何代理、隧道、流量转发或网络管控对抗能力。使用本工具产生的一切后果由使用者自行承担。请遵守你所在地区的法律法规。
+
+---
 
 ## License
 
-**ghprobe** 以 **GNU General Public License v3.0** 发布，授权范围 **GPL-3.0-or-later**（SPDX 标识符：`GPL-3.0-or-later`）——即被许可方可选择按 GPL v3 或任何后续版本使用。
+**ghprobe** 以 **GNU General Public License v3.0** 发布，授权范围为 **GPL-3.0-only**（SPDX 标识符：`GPL-3.0-only`）。
+
+注意：**不是** `GPL-3.0-or-later`。本项目**刻意**只接受 GPL v3 这一个版本，不接受「或任何后续版本」——这是一次有意的版本锁定（例如为避免未来某个 GPL v4 的条款被自动适用于本作品）。请在再分发时遵循同样的版本锁定。
 
 ```
 ghprobe — GitHub 直连优选：本地 DoH 解析 + TLS 证书终审探测 + hosts 生成（无代理）
@@ -220,8 +432,7 @@ Copyright (C) 2026 zmw
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+the Free Software Foundation, version 3 of the License.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -234,8 +445,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 你可以自由地运行、研究、修改和再分发本软件，但需满足 GPL-3.0 的以下条件：
 
-- **开源传染（copyleft）**：分发本软件或其衍生作品时，必须一并提供完整对应源码，且衍生作品须以**相同协议**授权
-- **保留声明**：不得移除版权声明、许可声明与免责声明
-- **无担保**：作者不提供任何明示或默示担保（详见 GPL-3.0 第 15、16 条）
+- **开源传染（copyleft）**：分发本软件或其衍生作品时，必须一并提供完整对应源码，且衍生作品须以**相同协议**授权。
+- **保留声明**：不得移除版权声明、许可声明与免责声明。
+- **无担保**：作者不提供任何明示或默示担保（详见 GPL-3.0 第 15、16 条）。
 
-完整协议文本见仓库根目录的 [`LICENSE`](LICENSE)（顶部为版权声明，下方为 GPL-3.0 逐字正文）；每个源文件头部均带 `SPDX-License-Identifier: GPL-3.0-or-later` 声明。
+完整协议文本见仓库根目录的 [`LICENSE`](LICENSE)。仓库地址：<https://github.com/zmw-zmw/ghprobe>。

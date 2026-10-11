@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 配置加载：默认 YAML + 可选用户覆盖（对象递归浅合并：顶层用户键覆盖默认键，对象属性合并而非整体替换）
 import fs from "node:fs";

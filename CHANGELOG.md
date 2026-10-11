@@ -7,6 +7,42 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **许可证收敛为 `GPL-3.0-only`**（原 `GPL-3.0-or-later`）：刻意不接受「或任何更高版本」，
+  避免他人在版本解释上做文章。`LICENSE` 重写为纯英文官方 GPLv3 正文，附录模板填入真实
+  程序名/年份/作者/仓库地址（`https://github.com/zmw-zmw/ghprobe`）
+- **健康哨兵间隔 5 分钟 → 1 分钟**（`schedule.healthMin`）。这是「IP 死了到自动换掉」的
+  最坏等待时间：探测本身只要 ~20s，用户却平均要多等 2.5 分钟 —— 瓶颈在调度间隔而非探测。
+  1 分钟是 Task Scheduler 重复间隔的下限
+- **部分更新只探被诊断的域名**：典型场景「`github.com` 的 IP 死了，`codeload` / `jsdelivr`
+  还活着」原先会把 6 个域名、近 50 个候选全探一遍。现在只探失败的那 1 个（~8 个候选），
+  端到端修复时间 ~90s → ~20s
+- **DoH 解析改为并行**：原先 6 个域名串行，最坏耗时 = 域名数 × `dohMs`（30s）；并行后压回一个 `dohMs`
+- **探测任务改用全局并发池**：原先每域名各开一个池，实际并发 = 域名数 × `concurrency`（36 条
+  socket），最坏耗时与瞬时连接数被同时放大
+- **计划任务无窗口运行**：Task Scheduler 起 `node.exe` 必弹控制台窗口，而 node 没有隐藏窗口的
+  开关。改为注册 `wscript.exe` 跑一个 VBS 包装器（`WScript.Shell.Run(cmd, 0, True)` = `SW_HIDE`）
+- README 中英双版重写：补项目介绍、逐条列出的痛点、工作原理、完整使用方式（命令）、
+  以及「为什么会出现 `cdn.jsdelivr.net`」的正面说明
+
+### Added
+
+- **`stuck` 上报**：被诊断了、本轮却一个活 IP 都没找到、只能保留旧值的域名，会显式写进日志
+  （`stuck=github.com`）。此前只记 `action=none reason=无变化`，在黑洞窗口里会让人误以为工具没干活
+- 已提权时跳过提权包装（`isElevated()`）：计划任务本身就以最高权限运行，原先
+  `applyHosts` 还会再走一次 `Start-Process -Verb RunAs`，多拉一个控制台窗口，是无窗口运行的第二个破口
+
+### Fixed
+
+- **windows-latest CI 失败**（`not ok 48`）：`buildUninstallTaskScript` 的实跑用例用裸
+  `fs.writeFileSync` 落盘 `.ps1`（无 UTF-8 BOM）。英文 Windows 的 ANSI 代码页是 CP1252，
+  中文「任务」的 UTF-8 字节里含 `0x92`，在 CP1252 下被解成 `’`（U+2019）—— 而 PowerShell
+  把 `’` 当作**合法单引号定界符**，字符串被提前截断 → `ParserError: Missing ')' in method call`。
+  中文 Windows（GBK）恰好不暴露此问题，所以本地一直绿的。改用 `writePs1WithBom`
+- **部分更新时白跑兜底轮**：`neededFallbacks` 原先只要 `ranked` 里取不到某域名就判「全灭」。
+  但 `rank` 对「本轮没探过」的域名根本不建键，于是每轮都会白跑一次兜底 DoH + 探测
+
 ## [0.1.0] - 2026-10-11
 
 首个公开版本。
@@ -48,7 +84,5 @@
 - 提权脚本以 UTF-8 BOM 落盘，杜绝编码解析歧义
 - 写入前校验块标记存在，失败自动回滚；还原时只移除本工具自己的行
 
-[Unreleased]: https://github.com/OWNER/ghprobe/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/ghprobe/releases/tag/v0.1.0
-
-<!-- 仓库公开后，把上面两行链接里的 OWNER/ghprobe 替换为真实地址。 -->
+[Unreleased]: https://github.com/zmw-zmw/ghprobe/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/zmw-zmw/ghprobe/releases/tag/v0.1.0

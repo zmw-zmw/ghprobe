@@ -6,7 +6,7 @@
   "bin": { "ghprobe": "bin/ghprobe.js" },
   "main": "bin/ghprobe.js",
   "engines": { "node": ">=18" },
-  "license": "GPL-3.0-or-later",
+  "license": "GPL-3.0-only",
   "files": [
     "bin/",
     "src/",

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 三关探测：TCP RTT -> TLS 握手 + 证书域名校验 -> HTTP 应用层终审
 // 证书校验拦的是 DNS 污染，应用层终审拦的是共享 CDN 上未部署该域名的"假活"IP

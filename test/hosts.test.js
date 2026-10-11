@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 离线单测：hosts 块生成与合并替换 + 跨进程写锁
 import { test } from "node:test";
@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom, buildApplyScript, buildRestoreScript, buildInstallScript } from "../src/hosts.js";
+import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom, buildApplyScript, buildRestoreScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
 
 const ranked = new Map([["github.com", [{ ip: "20.205.243.166" }, { ip: "20.27.177.113" }]]]);
 const extra = new Map([["cdn.jsdelivr.net", [{ ip: "104.16.0.1" }]]]);
@@ -88,7 +88,11 @@ test("buildUninstallTaskScript: 先判空后删除 + 删除失败必须非零退
 
 test("buildUninstallTaskScript: 任务不存在时幂等退出 0", { skip: process.platform !== "win32" }, async () => {
   const tmp = path.join(os.tmpdir(), `gp-uninstall-test-${Date.now()}.ps1`);
-  fs.writeFileSync(tmp, buildUninstallTaskScript("ghprobe-definitely-not-exist-xyz"), "utf8");
+  // 🔴 必须用 writePs1WithBom（带 UTF-8 BOM），不能裸 fs.writeFileSync：
+  // 英文 Windows 的 ANSI 代码页是 CP1252，中文「任务」的 UTF-8 字节里含 0x92，
+  // 在 CP1252 下解成 ’（U+2019）—— 而 PowerShell 把 ’ 当合法单引号定界符，
+  // 字符串被提前截断 → ParserError。中文 Windows（GBK）恰好不会暴露这个问题。
+  writePs1WithBom(tmp, buildUninstallTaskScript("ghprobe-definitely-not-exist-xyz"));
   try {
     const r = await new Promise((resolve) => {
       execFile("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp], (e, out, err) => {
@@ -264,4 +268,45 @@ test("buildInstallScript: writeHosts=false 时不碰 hosts，但仍注册任务"
   assert.ok(!s.includes("Copy-Item -Force $tmp $src"), "--skip-probe 时不应写 hosts");
   assert.ok(s.includes("$hostsOk = $true"), "跳过写 hosts 时应把该步视为通过");
   assert.ok(s.includes("Register-ScheduledTask"), "仍应注册任务");
+});
+
+// ── 无窗口运行：node.exe 没有隐藏窗口开关，只能靠 wscript + VBS 的 SW_HIDE ──
+test("buildHiddenRunnerVbs: ShowWindow 传 0(SW_HIDE) 且等待子进程结束", () => {
+  const vbs = buildHiddenRunnerVbs("C:\\node\\node.exe", "C:\\pkg\\bin\\ghprobe.js", "health --apply");
+  const line = vbs.split(/\r?\n/).find((l) => l.startsWith("sh.Run"));
+  assert.ok(line, "缺少 sh.Run 行");
+  assert.ok(line.endsWith(', 0, True'), `第三个参数必须是 0(隐藏)+True(等待)，实际: ${line}`);
+  assert.ok(vbs.includes('CreateObject("WScript.Shell")'));
+});
+
+test("buildHiddenRunnerVbs: 带空格路径的引号在 VBS 字符串里成对转义", () => {
+  const vbs = buildHiddenRunnerVbs("C:\\Program Files\\nodejs\\node.exe", "C:\\a b\\ghprobe.js", "health --apply");
+  const line = vbs.split(/\r?\n/).find((l) => l.startsWith("sh.Run"));
+  // VBS 里 " 要写成 ""，所以 `"path"` 会变成 `""path""`
+  assert.ok(line.includes('""C:\\Program Files\\nodejs\\node.exe""'), "node 路径引号未转义");
+  assert.ok(line.includes('""C:\\a b\\ghprobe.js""'), "bin 路径引号未转义");
+  // 剥掉最外层那对「字符串定界符」后，剩余内容里不得再有落单的 "（落单 = VBS 语法崩）
+  const body = line.slice("sh.Run ".length, line.length - ", 0, True".length);
+  assert.ok(body.startsWith('"') && body.endsWith('"'), `参数未用引号包裹: ${body}`);
+  assert.equal(body.slice(1, -1).replace(/""/g, "").includes('"'), false, "存在未成对转义的引号");
+});
+
+test("buildInstallScript: 给了 vbsPath 就走 wscript，没给则退回直接跑 node", () => {
+  const withVbs = buildInstallScript({
+    hostsPath: "C:\\h", tmpPath: "C:\\t", nodePath: "C:\\node\\node.exe", binPath: "C:\\b.js", vbsPath: "C:\\d\\run-hidden.vbs",
+  });
+  assert.ok(withVbs.includes("wscript.exe"), "有包装器时应由 wscript 启动");
+  assert.ok(withVbs.includes("C:\\d\\run-hidden.vbs"), "任务动作应指向 VBS 包装器");
+  assert.equal(withVbs.includes("-Execute 'C:\\node\\node.exe'"), false, "有包装器时不该再直接跑 node");
+
+  const noVbs = buildInstallScript({
+    hostsPath: "C:\\h", tmpPath: "C:\\t", nodePath: "C:\\node\\node.exe", binPath: "C:\\b.js",
+  });
+  assert.ok(noVbs.includes("-Execute 'C:\\node\\node.exe'"), "无包装器时应退回直接跑 node");
+  assert.equal(noVbs.includes("wscript.exe"), false);
+});
+
+test("userDataDir: 落在用户数据目录下的 ghprobe 子目录（npm 升级不会清掉）", () => {
+  assert.equal(path.basename(userDataDir()), "ghprobe");
+  assert.ok(userDataDir().includes("ghprobe"));
 });

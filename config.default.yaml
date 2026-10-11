@@ -28,7 +28,11 @@ fallbacks:
 timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
 probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
 serve: { host: 127.0.0.1, port: 8930 }
-# 调度：固定频率健康检查，不做指数退避（健康检查一轮 <2s，退避省不下开销反而拉长最坏发现延迟）
+# 调度：固定频率健康检查，不做指数退避（哨兵一轮 <2s，退避省不下开销反而拉长最坏发现延迟）
 schedule:
-  healthMin: 5            # 哨兵间隔（分钟）：只测已写入 IP，异常才触发全量
+  # 哨兵间隔（分钟）：只测已写入 IP（3 条并发，健康时 ~1s），异常才触发全量重排。
+  # 🔴 取 1 是刻意的：这是「IP 死了到自动换掉」的**最坏等待**。5 分钟时代码本身只要 20s 就能修好，
+  #    但用户平均要多等 2.5 分钟 —— 卡在调度间隔上而不是卡在探测上。1 分钟是 Task Scheduler
+  #    重复间隔的下限（New-ScheduledTaskTrigger 最小 1 分钟），已经到底了。
+  healthMin: 1
   absentCooldownHours: 1  # 缺失域名冷却（小时）：SNI 层封锁的域名全量也救不回，冷却内不重试

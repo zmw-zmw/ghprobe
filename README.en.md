@@ -2,64 +2,188 @@
 
 English | [简体中文](README.md)
 
-Your network, your measurements — GitHub direct-connect hosts, probed and updated locally, no proxy required.
+**A Windows command-line tool that speeds up direct connections to GitHub: it measures the IPs that actually work on *your* network right now, writes them into your hosts file, and swaps them out automatically when they die. No proxy, no system proxy changes, no traffic hijacking.**
 
-## What it is
+The problem it solves is concrete: GitHub direct connections are sometimes fast, sometimes dead, `git clone` / `git push` hang or time out, and the hosts list you copied off the internet is a static snapshot that nobody maintains — when an IP dies, nobody notices. ghprobe moves "finding a usable IP" onto your own machine, automates it, and gives it self-healing.
 
-Reaching GitHub from mainland China is not just a DNS problem. Hostname-level SNI blacklists (e.g. `raw.githubusercontent.com` being reset precisely), and entire ranges of good resolver endpoints getting blocked, vary by region, ISP, and time of day. Any centrally published static hosts list is therefore always stale.
+- **Windows** only (writing the system hosts file, UAC elevation, and registering a scheduled task are all Windows-only capabilities)
+- Touches **the hosts file only** — installs no proxy / driver / service
+- Requires **Node.js ≥ 18**
+- License **GPL-3.0-only**, author **zmw**, repository <https://github.com/zmw-zmw/ghprobe>
 
-ghprobe moves the probing onto your own machine:
+---
 
-1. **DoH federation for candidates** — everything goes over DoH (no UDP/53 path), using endpoints verified reachable from mainland China, merged with a built-in IP pool
-2. **Three-stage probe** — TCP RTT → TLS handshake + certificate SAN validation → HTTP application-layer final check
-3. **Rank and write hosts** — picks the fastest usable IP per domain, writes to the system hosts file with elevation (automatic backup); git and browsers connect directly right away
-4. **Fallback chain** — when all candidates for a primary domain fail, automatically probes substitute domains (e.g. `raw` falls back to jsdelivr)
-5. **Scheduled health checks** — a scheduled task tests the already-written IPs every 5 minutes and only runs a full re-rank when something is actually wrong (not a blind periodic re-run)
+## 1. What it is
 
-It provides no proxy, tunnel, traffic forwarding, or protocol evasion. It only selects directly reachable nodes within your carrier's normal channel.
+### What it actually does
 
-## How it works
+In one sentence: **ghprobe uses local probing to pick the fastest, most usable IP for each GitHub-related domain, and writes a self-maintaining hosts block.**
 
-```mermaid
-flowchart LR
-    A[domains + DoH endpoints + IP pool] --> B{Concurrent DoH queries}
-    B --> C[Candidate IP list]
-    C --> D{Three-stage probe}
-    D --> D1[TCP RTT]
-    D --> D2[TLS certificate SAN check]
-    D --> D3[Real business path + status code + body + redirect whitelist]
-    D1 --> E{All passed?}
-    D2 --> E
-    D3 --> E
-    E -->|Yes| F[Rank by latency]
-    E -->|No| G[Mark failed]
-    F --> H{Primary domain has a live IP?}
-    H -->|Yes| I[Build hosts block]
-    H -->|No| J[Probe fallback domains]
-    J --> I
-    I --> K[Elevated write to hosts<br/>backup + flush DNS cache]
+A full round is: resolve candidate IPs via local DoH → run a "three-stage probe" on every candidate → rank by latency → write the best entry per domain into hosts. After that, a scheduled task health-checks periodically and re-ranks to swap in fresh IPs when the old ones die.
+
+It provides **no** proxy, tunnel, traffic forwarding, or protocol evasion, and it does **not** try to "break through" anything; as long as the path is reachable in the first place, it does three things: **prefer good IPs, reject false-alive nodes, and replace IPs automatically when they fail.**
+
+### Core technical points
+
+**① Local DoH resolution, bypassing system-DNS poisoning**
+
+Candidates do not come from system DNS (which may be poisoned); they come over DoH (RFC 8484 wire format, with no UDP/53 path at all). The defaults are endpoints verified reachable from mainland China: Alibaba DNS (`223.5.5.5` / `223.6.6.6`) and DNSPod (`1.12.12.12`).
+
+Key detail: **DoH endpoints are reached by IP directly, with SNI validation.** If reaching a DoH endpoint itself required resolving its hostname first, you would fall into the deadlock of "resolving the DoH hostname requires resolving first." So the config stores the endpoint's IP, and a `sni` field carries the service hostname for certificate validation (RFC 6066 forbids using an IP as SNI), for example:
+
+```yaml
+doh:
+  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
+  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
+  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
 ```
 
-**Three-stage probe in detail:**
+Multiple endpoints are queried concurrently; successful answers are unioned and de-duplicated, then a built-in IP pool adds more candidates.
 
-- **TCP RTT** — establish a connection on port 443 and measure baseline network latency
-- **TLS certificate SAN check** — the certificate SAN must contain the target domain; DNS poisoning cannot forge a valid certificate
-- **HTTP application-layer final check** — send a real `GET` with `Host: <domain>` on the **real business path** (e.g. `codeload.github.com` requests the archive download path, not the root), validating:
-  - status code not in the allow list (5xx is an immediate fail)
-  - response body does not contain error signatures such as `unknown domain` / `Fastly error`
-  - response body contains features the domain must have (e.g. `github.com` must contain `github`)
-  - 3xx redirect target is not in that domain's whitelist (a bad `codeload.github.com` node will 302 back to the main site and gets rejected)
+**② Three-stage probe: only an IP that passes all three is "alive"**
 
-  Shared CDNs (such as Fastly) may return a valid certificate for `github.com` along with an error page; the root path of `codeload.github.com` may 301 to the main site while the archive path is still unusable. This stage filters out such "false-alive" IPs.
+For each `(domain, candidate IP)`:
 
-## Quick start
+1. **TCP RTT** — open a connection on port 443 and measure baseline latency.
+2. **TLS handshake + certificate SAN validation** — `rejectUnauthorized: true`, with `servername` set to the target domain (SNI). The certificate must contain the target domain; DNS poisoning cannot forge a valid certificate.
+3. **HTTP application-layer final check** — send a real `GET` with `Host: <domain>` on a real business path, read back a small prefix of the body and validate: is the status code in the allow list, does the body contain error signatures, does it contain features the domain must have, is the 3xx redirect target within the whitelist.
 
-Requires Node.js >= 18.
+**Why is stage 3 mandatory?** Because stage 2's certificate check cannot stop "false-alive IPs on shared CDNs." Example: a shared Fastly node such as `185.199.x.x` will return a **perfectly valid** certificate for `github.com` (the SAN really does match), yet the HTTP body is `Fastly error: unknown domain` — that IP does not serve `github.com` at all. A certificate-only check would treat such a "false-alive IP" as a good node and write it into hosts, so hosts looks successfully written while GitHub becomes *less* reachable. Stage 3 does the final judgment using the **real business path** and the **response content**, which is what filters it out (for the same reason, `codeload.github.com` is probed on the archive-download path, not the root, because the root may 301 back to the main site).
 
-> **Platform support: Windows.** Writing the system hosts file, UAC elevation, and registering
-> the scheduled task are all Windows-only capabilities. The core logic (probing / ranking / DoH /
-> HTTP API) is cross-platform (CI runs it on ubuntu too) — on Linux/macOS you can run `probe` to
-> see results, but it will **not** (and cannot) write the system hosts file.
+**③ No proxy**
+
+It writes the hosts file, and nothing else. No proxy software, no system proxy settings changed, no drivers, no traffic hijacking. Uninstalling just strips ghprobe's own block out of hosts, leaving nothing behind.
+
+**④ Fault layering (this is the project's value proposition)**
+
+"GitHub is unreachable" has causes at different layers, and the fix differs per layer:
+
+| Fault layer | Symptom | Fixable by "changing the IP"? |
+| --- | --- | --- |
+| **DNS poisoning** | resolves to a wrong / unreachable IP | ✅ Yes. Just switch to a correct IP |
+| **SNI hostname blacklist** | the hostname itself is blocked — the SNI in the TLS handshake carries the blocked domain | ❌ No. No IP will help; only **changing the domain** works |
+| **IP blackhole** | entire IP ranges are dropped | ✅ Yes. Switch to a working range |
+
+Many tools/tutorials only handle the first layer and are helpless against the second (e.g. `raw.githubusercontent.com` being precisely RST). ghprobe handles the second layer with a dedicated **fallback chain** (see section 5), treating the "changing the IP can't fix it" case separately.
+
+---
+
+## 2. Pain points it solves
+
+**Pain point 1: direct GitHub access is sometimes fast, sometimes dead**
+
+`git clone` stalls at `Receiving objects`, `git push` times out, pages spin — same repo, same network, works in the morning, dead at night. Because the usable IPs for each GitHub domain drift with region, ISP, and time of day, and the address system DNS hands you is often slow or broken.
+
+**Pain point 2: the hosts list you copied is a static snapshot**
+
+The "GitHub hosts accelerator" list you find online is a snapshot someone measured at one point in time. When an IP dies, nobody knows, and it never updates itself. You apply it once, it works for a few days, then it stops working and you go hunting for a new list — which is really just manually maintaining a table that is doomed to go stale.
+
+**Pain point 3: many tools want a proxy / system proxy change / driver install**
+
+To speed up GitHub you are asked to install a pile of things: a proxy client, a system-proxy toggle, a TUN/TAP driver, a background service… heavy, dirty, and it may change how your browser, IDE, and other software reach the network. You just want `git clone` to be a bit faster; you don't want the whole system's network path rewritten.
+
+**Pain point 4: picking IPs by hand with `ping` / `curl` is guesswork — and the "alive" one may be fake**
+
+A manual `ping` only proves an IP responds; it does not prove that the IP actually serves GitHub. A shared CDN node will hand you a valid TLS certificate but tell you `unknown domain` at the HTTP layer — your ping looks "fine," yet after writing it into hosts GitHub gets *worse*. Picking IPs by feel walks straight into this trap.
+
+**Pain point 5: GitHub suddenly breaks after boot and you have to go dig up IPs yourself**
+
+IPs usually die while you are not looking. With no automatic check, you only find out when "it stops working one day," and then you go dig manually. ghprobe self-heals on a schedule: it sits silently, and the moment a written IP fails it re-ranks and swaps in a new one — without you watching.
+
+---
+
+## 3. How it works
+
+### Overall flow
+
+```
+                        ┌─────────────────────────────────────┐
+                        │  config: domains + DoH endpoints +  │
+                        │  IP pool                            │
+                        └──────────────────┬──────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  Local DoH federation (concurrent,│  ← bypasses
+                          │  IP direct-connect) + IP pool     │    system-DNS poisoning
+                          │  → candidate IP list              │
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │         Three-stage probe        │
+                          │  ① TCP RTT                       │
+                          │  ② TLS handshake + cert SAN      │  ← blocks DNS poisoning
+                          │  ③ HTTP application-layer check  │  ← blocks shared-CDN fakes
+                          └────────────────┬────────────────┘
+                                           │
+                          all three passed? ──no──▶ mark failed, drop
+                                           │yes
+                          ┌────────────────▼────────────────┐
+                          │  rank by score ascending, take   │
+                          │  the best per domain             │
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  live IP for primary domain? ──no──▶ probe fallback domains │  ← change domain to beat SNI blocking
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  build hosts block (1 entry/dom.)│
+                          └────────────────┬────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  elevated write to hosts + flush │
+                          │  DNS cache; all-dead guard runs  │
+                          │  before writing                  │
+                          └─────────────────────────────────┘
+```
+
+### How the three command paths relate
+
+There is only one core pipeline (DoH → three-stage probe → ranking), used through three command paths:
+
+- **`ghprobe probe`** — run one full probe, **without writing hosts** (add `--apply` to write). Good for first seeing what your network can measure.
+- **`ghprobe health`** — health check: **only tests the IPs already written into hosts**. If everything is healthy it exits silently and touches nothing; only on failure does it trigger a full re-rank to swap IPs. This is what the scheduled task actually calls.
+- **`ghprobe install`** — one-shot enable: runs a conservative health-check-style probe first, then in **a single UAC** both writes hosts and registers the scheduled task (which calls `health --apply` on a timer).
+
+All three share the same rules when writing hosts (same block format, same all-dead guard), so a manual `probe --apply` and the scheduled `health --apply` never clobber each other.
+
+### Scheduling model: a sentinel, with a full re-rank only on failure
+
+A fixed "full re-run every N hours" is a mismatch: wasteful when the network is fine, too slow when it isn't. ghprobe uses **tiers** instead:
+
+- **Sentinel tier (default every 1 minute)**: one `health` run probes only the **already-written IPs** in the hosts block (with `probe.concurrency` concurrency), finishing in under 2 seconds. If all are healthy it exits silently without touching hosts.
+- **Heavy tier (triggered only on failure)**: a full probe (DoH re-resolution + all candidates through the three stages) runs only once an existing IP is confirmed dead.
+
+The sentinel interval comes from `schedule.healthMin`, default **1 minute** (also the lower bound for a Windows Task Scheduler repetition interval). It is the **worst-case wait** for "IP dies → swapped out."
+
+### Anti-jitter and safety design
+
+- **All-fail predicate (only a total outage counts as network failure)**: the network is judged to be at fault (blackhole window) only when **all written IPs fail** and there are ≥ 2 entries; then nothing is written that round. As long as **any single entry is healthy**, the path is up, so the failing ones are just stale/dead IPs and a re-rank is triggered. (The earlier "majority failed → give up" predicate was proven to misfire: its denominator counted only written entries and was often as low as 3–4, so "3 stale + 1 healthy" was misjudged as an outage — not fixing when it should.)
+- **All-dead guard**: before writing, if the new block has **no valid IP at all** while hosts still has old entries, the write is **refused and the old entries are kept**. This prevents a network blip of a few tens of seconds from wiping mappings that were working. `probe --apply` and `health --apply` share this guard.
+- **Partial update + IP stickiness**: after a full re-rank, only domains that **actually differ** from the current hosts are updated; tiny score jitter on a healthy domain won't trigger an IP change (each change costs a DNS cache flush and invalidates connection pools).
+- **`# absent` cooldown**: domains present in config but absent from hosts (typically SNI-blocked domains that even a full run can't save) are recorded as a `# absent <domain> <timestamp>` comment inside the hosts block, and are not retried for `schedule.absentCooldownHours` (default 1 hour), so the heavy tier doesn't fire uselessly every minute.
+- **Stateless**: the `# absent` cooldown table is encoded directly in the hosts block comments — it survives process restarts and cross-process runs with no extra state file.
+- **Cross-process write lock**: `probe --apply` and the scheduled task may write hosts concurrently, so a lock file serializes them and avoids read-modify-write clobbering; if the lock can't be acquired the round is skipped and the next health check writes it.
+
+### The hosts block looks like this
+
+```text
+# === ghprobe begin ===
+# generated 2026-10-11T00:00:00.000Z by ghprobe
+140.82.112.3 github.com
+20.27.177.113 codeload.github.com
+185.199.108.133 raw.githubusercontent.com
+# absent gist.githubusercontent.com 2026-10-11T00:00:00.000Z
+# === ghprobe end ===
+```
+
+Everything between `# === ghprobe begin/end ===` is owned by ghprobe; repeated writes only replace what's inside the block. **Lines outside the block (your own hosts entries and anything a third-party tool wrote) are never touched.** Windows only honors the first entry per domain, so exactly one best entry is written per domain.
+
+---
+
+## 4. Usage
+
+> Platform: **Windows**; prerequisite: **Node.js ≥ 18**. Run all commands in **PowerShell or cmd**.
 
 ### Option 1: install from npm (recommended)
 
@@ -67,84 +191,107 @@ Requires Node.js >= 18.
 npm install -g ghprobe
 ```
 
-Then, in **PowerShell or cmd**, two commands are all it takes:
+Then two commands are all it takes:
 
 ```bash
 ghprobe install     # start: probe + write hosts + register the scheduled task (a single UAC prompt)
 ghprobe uninstall   # stop: remove the scheduled task and restore hosts
 ```
 
-After that you never touch the command line again: it health-checks every 5 minutes and re-ranks
-automatically when IPs go stale.
+**What `ghprobe install` does:**
 
-> If the package is not published to npm yet, run `npm install -g .` inside the repository directory
-> for the same effect.
+1. Runs a **conservative health-check-style probe** first: it tests only the IPs already written into hosts, keeping the healthy ones and re-ranking only the confirmed-dead ones (so domains whose current IP is still healthy but weren't captured this round are not misrecorded as missing).
+2. Prompts for **a single UAC**, then in the same elevated session does two things:
+   - **Writes hosts once**: backs up the current hosts to `hosts.ghprobe-bak`, writes the ghprobe block, verifies the block marker exists, rolls back automatically on failure, and flushes the DNS cache on success.
+   - **Registers the Windows scheduled task named `ghprobe`**: it runs **silently at highest privileges (RunLevel=Highest)** (so later writes never prompt UAC again) and runs `health --apply` on the `schedule.healthMin` interval (default 1 minute). The task action is launched through a hidden-window wrapper, so it is **windowless** and does not disturb you.
+
+   It's ready to use right away; you never touch the command line again.
+
+**What `ghprobe uninstall` does:**
+
+1. **Restores hosts**: **strips** the whole ghprobe block and writes it back — it removes only ghprobe's own lines and **keeps third-party entries untouched** (it deliberately does *not* overwrite from `hosts.ghprobe-bak`: that backup is a "before write" snapshot, and overwriting from it would also roll back entries later added by other software), then flushes the DNS cache.
+2. **Removes the scheduled task**: `Unregister-ScheduledTask ghprobe`; idempotent when the task doesn't exist.
+
+   The two steps are independent — a failure in either does not affect the other, and the process exits non-zero on failure.
+
+> If the package is not published to npm yet, run `npm install -g .` inside the repository directory for the same effect.
 
 ### Option 2: clone and one-click deploy
 
-Double-click `install.cmd`, or run in PowerShell:
+```bash
+git clone https://github.com/zmw-zmw/ghprobe
+cd ghprobe
+```
+
+Then double-click `install.cmd`, or run in PowerShell:
 
 ```powershell
 .\install.ps1
 ```
 
-It will: self-elevate (**a single UAC prompt in total**) → check the Node version → install dependencies → register the scheduled task → write hosts once immediately → **self-check and print the result back to the current window**. Ready to use right away; from then on it health-checks every 5 minutes and re-ranks automatically when IPs go stale.
+`install.ps1` will: self-elevate (**a single UAC prompt in total**) → check the Node version (≥ 18) → install dependencies → register the scheduled task → write hosts once immediately → **self-check and print the result back to the current window**.
+
+Available switches:
 
 ```powershell
-.\install.ps1 -SkipProbe    # register the scheduled task only; let the first health check write hosts
-.\install.ps1 -Uninstall    # uninstall: remove the scheduled task and restore hosts
+.\install.ps1                 # deploy: register the scheduled task + write hosts once now
+.\install.ps1 -SkipProbe      # register the scheduled task only; let the first health check write hosts
+.\install.ps1 -Uninstall      # uninstall: remove the scheduled task + restore hosts
 ```
 
-> The deployment path depends only on Node.js and this repository's own source; no closed-source components.
-> If you operate the machine through Remote Desktop / Sunlogin, note that **the UAC prompt uses the
-> secure desktop and may be invisible in the remote session** — run it at the physical machine, or use a
-> terminal started as Administrator.
+> `install.ps1` also supports `-LogFile <path>` to set the deploy log path (default `%TEMP%\ghprobe-deploy.log`); `-Inner` is used internally for self-elevation and should not be passed manually.
+> `install.cmd` is just a cmd wrapper around `install.ps1` (equivalent, double-click to run).
 
-### Manual commands
+### Other commands
 
 ```bash
-# 1. Run one probe round and print results (does not touch the system)
-node bin/ghprobe.js probe
+# Run one probe round and print results (does not write hosts)
+ghprobe probe
+ghprobe probe -j            # output JSON (for scripting)
+ghprobe probe --apply       # probe then write to system hosts (UAC prompt; automatic backup)
 
-# 2. Run one round and write to the system hosts file (UAC prompt; original backed up to *.ghprobe-bak)
-node bin/ghprobe.js probe --apply
+# Only build and print the hosts block; you decide whether to write it
+ghprobe hosts
 
-# 3. Only print the hosts block, you decide whether to write it
-node bin/ghprobe.js hosts
+# Run a health check manually (does not write hosts by default; only previews on failure)
+ghprobe health
+ghprobe health --apply      # write to system hosts when a problem is detected (UAC prompt)
 
-# 4. Register the scheduled task: health check every 5 min, full re-rank only on failure (runlevel=highest, silent elevation)
-node bin/ghprobe.js install
+# Local HTTP API (default 127.0.0.1:8930)
+ghprobe serve
+#   POST /api/probe    trigger one probe round, return a summary
+#   GET  /api/status   latest result
+#   GET  /api/hosts    current generated hosts block
+#   GET  /api/config   effective config
 
-# 5. Run a health check manually (does not write hosts; only previews on failure — add --apply to write)
-node bin/ghprobe.js health
-
-# 6. Remove the scheduled task and restore hosts
-node bin/ghprobe.js uninstall
-
-# 7. Local API (default 127.0.0.1:8930)
-node bin/ghprobe.js serve
-#   POST /api/probe   trigger a probe
-#   GET  /api/status  latest result
-#   GET  /api/hosts   generated hosts block
-#   GET  /api/config  effective config
+# Every command supports -c / --config for a user config override
+ghprobe probe -c my.yaml
 ```
 
-> This repository is not published to npm yet, hence `node bin/ghprobe.js` above; `package.json` already
-> declares `bin`, so `npx ghprobe` will be equivalent once published.
+### Configuration override
 
-## Configuration
-
-The default config is built in (`config.default.yaml`) and can be overridden with `-c my.yaml`. Object
-properties (such as `timeouts` / `probe` / `serve`) are merged recursively — you only need to write the
-keys you want to change:
+The default config is built in (`config.default.yaml`). Pass a YAML file containing **only the parts you want to change** via `-c my.yaml`: object properties (such as `timeouts` / `probe` / `serve` / `schedule`) are **merged recursively**, so you only write the keys you want to change.
 
 ```yaml
-# Change only the TLS timeout to 3s; dohMs/httpMs keep their defaults
+# Example 1: change only the TLS timeout to 3s; dohMs / httpMs keep their defaults
 timeouts:
   tlsMs: 3000
+
+# Example 2: change the sentinel interval to 5 minutes
+schedule:
+  healthMin: 5
+
+# Example 3: use different DoH endpoints (note: host is an IP, sni is the service domain)
+doh:
+  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
+
+# Example 4: adjust the target domain list
+domains:
+  - github.com
+  - raw.githubusercontent.com
 ```
 
-Full example:
+The full default config (key names and defaults, all matching the code):
 
 ```yaml
 domains:
@@ -155,18 +302,15 @@ domains:
   - gist.githubusercontent.com
   - avatars.githubusercontent.com
 
-# DoH endpoints (IP direct-connect; sni is the service domain used for certificate validation)
 doh:
   - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
   - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
-  - { name: dnspod, host: 1.12.12.12, sni: doh.pub, path: /dns-query }
+  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
 
-# Built-in candidate IP pool: added to candidates regardless of domain; TLS cert + application-layer checks sort them out
 ipPools:
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
   azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
 
-# Fallback chain: probe these substitute domains when a primary domain is fully down
 fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
@@ -174,57 +318,117 @@ timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
 probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
 serve: { host: 127.0.0.1, port: 8930 }
 schedule:
-  healthMin: 5            # sentinel interval (minutes): test written IPs only, full re-rank on failure
+  healthMin: 1            # sentinel interval (minutes): test written IPs only, full re-rank on failure
   absentCooldownHours: 1  # missing-domain cooldown (hours): SNI-blocked domains can't be saved even by a full run
 ```
 
-## Design notes
+### Uninstall / rollback and logs
 
-- **Why an application-layer final check**: a TLS certificate defeats DNS poisoning but not "false-alive" IPs on shared CDNs that don't serve the target domain. Measured: some Fastly nodes return a valid certificate for `github.com` along with a `Fastly error: unknown domain` page, so stage three must validate the HTTP status code and body
-- **Why the built-in pool is not split per domain**: the pool enters candidates regardless of domain and is sorted out by the certificate + application-layer checks. Simple, and immune to GitHub changing CDNs
-- **The hosts block is marked**: content between `# === ghprobe begin/end ===` is owned by this tool; repeated applies only replace what's inside the block, never your own entries
-- **One entry per domain**: Windows only honors the first entry per domain in hosts, so ghprobe writes only the best IP per domain. "Alternatives" in the ranking are for display only
-- **Writes are transactional**: refresh backup → overwrite → verify the block marker exists → roll back on failure → flush DNS cache
-- **Backup refreshed every time**: `*.ghprobe-bak` is regenerated before each write (not "created once") — if hosts gained third-party entries after install, a stale backup wouldn't contain them and a rollback would wipe them
-- **`uninstall` restores hosts**: the two steps are independent (a failure in either doesn't affect the other; the process exits non-zero on failure). First restore hosts — **strip the ghprobe block** and write back (deliberately not overwriting from `*.ghprobe-bak`: that backup is a "before write" snapshot and overwriting from it would also roll back entries added later by third parties); then remove the scheduled task — it lives in the root folder and runs with highest privileges, so a non-elevated delete gets "Access denied"; like `install`, this self-elevates and is idempotent when the task doesn't exist
-- **All-dead guard**: before writing, if the new block has no valid IP at all while hosts still has old entries, the write is refused and the old entries are kept (`probe --apply` and `health --apply` share the same predicate) — this prevents a network blip from wiping mappings that were working
+```bash
+ghprobe uninstall              # remove the scheduled task + restore hosts (removes only its own lines)
+```
 
-### Scheduling architecture
+If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
-Networks fluctuate; a fixed "full re-run every N hours" is a mismatch — wasteful when the network is fine, too slow when it isn't. ghprobe uses a **tiered health check** instead:
+- **Manual hosts rollback**: before each write the file is backed up to `C:\Windows\System32\drivers\etc\hosts.ghprobe-bak`; but `ghprobe uninstall` is preferred (it strips by block and won't harm third-party entries added later).
+- **Health-check log**: `%LOCALAPPDATA%\ghprobe\ghprobe.log`. The scheduled task runs silently and both stdout/stderr are discarded, so each round's result is appended here (`action` / `reason` / `changed`) so you can investigate if something breaks.
+- **Deploy log**: with `install.ps1`, written to `%TEMP%\ghprobe-deploy.log` by default.
 
-- **Sentinel tier (every 5 minutes)**: one `ghprobe health` run only probes the **already-written IPs** in the hosts block, finishing in under 2 seconds. If all are healthy it exits silently without touching hosts.
-- **Heavy tier (triggered only on failure)**: a full probe (DoH re-resolution + all candidates through three stages) runs only once an existing IP is confirmed dead.
+---
 
-Key anti-jitter and safety design:
+## 5. About "why is cdn.jsdelivr.net in there?"
 
-- **All-fail predicate**: the network is judged to be at fault (blackhole window) only when **all** written IPs fail simultaneously (and there are >= 2 entries); nothing is written that round — no empty block, no killing good IPs. As long as **any single entry is healthy**, the path is up and the failing ones are simply stale/dead IPs, so a re-rank is triggered.
-- **All-dead guard**: if a domain still has no live IP after a full probe, the old entry is kept — never written as an empty block that would wipe good IPs. The original IP is still there after the network self-heals within tens of seconds.
-- **Partial update + IP stickiness**: after a full re-rank only domains that actually differ from the current hosts are updated; tiny score jitter on a healthy domain won't trigger an IP change (each change costs a DNS cache flush + connection-pool invalidation).
-- **Missing-domain coverage**: domains present in config but absent from hosts (e.g. SNI-blocked `raw`) count as unhealthy and trigger a full retry; domains a full run still can't save are recorded in `# absent` with a 1-hour cooldown, so the heavy tier doesn't fire uselessly every 5 minutes.
-- **Stateless**: the missing-domain cooldown table is encoded directly into the hosts block comments — it survives process restarts and cross-process runs, with no extra state file.
+A user asked: **"This tool is meant to speed up GitHub specifically — why does it accelerate other domestic mirrors?"**
 
-The scheduled task registered by `install` runs at `runlevel=highest`, so applies elevate silently with no UAC prompt; only a manual `health --apply` prompts.
+First, the wording: **`cdn.jsdelivr.net` is not a "domestic mirror."** It is the jsDelivr CDN (running on Cloudflare), a global public CDN — a different thing entirely from a "domestic mirror site."
 
-## Known limitations
+Why does it appear in hosts at all? **The only reason is the fallback chain.**
 
-- The tool can only find IPs usable **on your current network at the current moment**; results change with ISP/region/time, which is why periodic re-runs are needed
-- If every candidate IP is unusable, the tool hits the fallback chain or the all-dead guard (keeping the old IPs rather than writing an empty block) — it never forces in wrong IPs
-- Windows hosts does not round-robin multiple IPs per domain, so ghprobe writes exactly one best record per domain
-- **No failover for a single IP**: only one best IP is written per domain. If it dies between two health checks, the worst-case interruption is `schedule.healthMin` (5 minutes by default). This is a limitation of the hosts mechanism itself, not something probing can avoid
-- **The scheduled task does not run while locked**: the task registered by `install` uses `LogonType = Interactive`, so it won't fire while locked / logged off / not logged in; it resumes on interval after logon
+Recall the fault layering from section 1: one fault type is the **SNI hostname blacklist** — what is blocked is the **hostname itself**. In that case the SNI in the TLS handshake carries the blocked domain, and **no IP will help**: you can switch to an IP on the other side of the planet and the client still has to name the blocked domain during the handshake, so it gets cut off just the same. The only way out is to **change the domain** and fetch the same content from elsewhere.
 
-## Disclaimer
+jsDelivr exposes a path that maps a GitHub repository file directly:
 
-This tool performs DNS preference selection and connectivity probing only. It does not provide, include,
-or assist with any proxy, tunnel, traffic forwarding, or network-control evasion capability. You are solely
-responsible for any consequences of using this tool. Please comply with the laws and regulations of your
-jurisdiction.
+```text
+https://cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>
+```
+
+In other words, the exact file content at `raw.githubusercontent.com/<user>/<repo>/<ref>/<path>` can be fetched from `cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>` — it is "the same content at another reachable entry point." So when `raw.githubusercontent.com` is SNI-blocked and all primary candidates are dead, ghprobe uses jsDelivr as a **fallback entry point**, so such files still have a route.
+
+**Caveats that must be stated:**
+
+- **In the default config, only `raw.githubusercontent.com` has this fallback:**
+
+  ```yaml
+  fallbacks:
+    raw.githubusercontent.com: [cdn.jsdelivr.net]
+  ```
+
+- **The primary domains `github.com` / `codeload.github.com` never use a fallback.** They only pick IPs within the official domain family.
+- **The fallback fires only when the primary candidates are entirely dead.** As long as the primary domain has any live IP, the fallback domain is never probed.
+- When the fallback hits, the IP written is that of the **fallback domain** (i.e. `cdn.jsdelivr.net`), not `raw.githubusercontent.com` — because what's being saved here is "change the domain," not "change the IP."
+
+**If you don't want this fallback**, you can remove it entirely:
+
+- Edit `config.default.yaml` and empty the `fallbacks` section:
+
+  ```yaml
+  fallbacks: {}
+  ```
+
+- Or override it with your own `--config` (objects merge recursively, so just give an empty object for `fallbacks`):
+
+  ```yaml
+  fallbacks: {}
+  ```
+
+  ```bash
+  ghprobe install -c my.yaml
+  ```
+
+After removing it, the tool uses **only official GitHub domains**. The cost: once `raw.githubusercontent.com` is SNI-blocked, that class of files has no alternative entry point at all (this is a property of that network environment, not something the tool can route around).
+
+---
+
+## 6. Requirements and FAQ
+
+### Requirements
+
+- **OS: Windows.** Writing the system hosts file, UAC elevation, and registering a scheduled task are all Windows-only capabilities.
+  (The core logic — probing / ranking / DoH / HTTP API — is cross-platform and CI runs it on ubuntu; but on Linux/macOS, `probe` only shows results and **will not and cannot** write the system hosts file.)
+- **Node.js ≥ 18.**
+- First install needs administrator rights (one UAC prompt).
+
+### FAQ
+
+**Q: Why does it need administrator rights?**
+The system hosts file (`C:\Windows\System32\drivers\etc\hosts`) is writable only by administrators, and registering a highest-privilege scheduled task also requires it. `ghprobe install` combines "write hosts" and "register the task" into **a single UAC prompt**, so you only see one.
+
+**Q: Why can't it always fix things?**
+The tool can only find IPs usable **on your current network at the current moment**. If the problem is an SNI hostname blacklist (which changing the IP can't fix) or an IP blackhole, every candidate may be unusable. In that case it hits the fallback chain (if configured) or the all-dead guard — it **keeps the old IPs and never writes an empty block**, and never forces in a wrong IP.
+
+**Q: Will it affect other software?**
+No. It **only writes the hosts file** — no proxy, no system-proxy changes, no traffic hijacking. It operates only on the block between `# === ghprobe begin/end ===` that belongs to it, so **your existing hosts entries and third-party entries are never modified**; uninstall likewise strips only its own block.
+
+**Q: Why only one IP per domain?**
+Windows honors only the first entry per domain in hosts, and multiple entries won't round-robin. So ghprobe writes exactly one best entry per domain; the "alternatives" in the ranking are for display only.
+
+**Q: What if an IP dies between two health checks?**
+Only one IP is written per domain; if it dies between checks, the worst-case interruption is about `schedule.healthMin` (1 minute by default). This is a limitation of the hosts mechanism itself, not something probing can avoid.
+
+**Q: Does the scheduled task run while the screen is locked?**
+The task registered by `install` uses `LogonType = Interactive`, so it won't fire while locked / logged off / not logged in; it resumes on the interval after logon.
+
+### Disclaimer
+
+This tool performs DNS preference selection and connectivity probing only. It does **not** provide, include, or assist with any proxy, tunnel, traffic forwarding, or network-control evasion capability. You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
+
+---
 
 ## License
 
-**ghprobe** is released under the **GNU General Public License v3.0**, licensed as
-**GPL-3.0-or-later** (SPDX identifier: `GPL-3.0-or-later`) — licensees may use it under GPL v3 or any later version.
+**ghprobe** is released under the **GNU General Public License v3.0**, licensed as **GPL-3.0-only** (SPDX identifier: `GPL-3.0-only`).
+
+Note: this is **not** `GPL-3.0-or-later`. The project **deliberately** accepts only GPL v3 and *not* "or any later version" — an intentional version lock (for example, so that a future GPL v4's terms are never automatically applied to this work). Please keep the same version lock when redistributing.
 
 ```
 ghprobe — GitHub direct-connect optimizer: local DoH resolution + TLS-verified probing + hosts generation (no proxy)
@@ -232,8 +436,7 @@ Copyright (C) 2026 zmw
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+the Free Software Foundation, version 3 of the License.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -246,10 +449,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 You are free to run, study, modify, and redistribute this software, subject to the GPL-3.0 conditions:
 
-- **Copyleft**: when distributing this software or a derivative work you must provide the complete
-  corresponding source and license the derivative under the **same license**
-- **Preserve notices**: you may not remove the copyright, license, or disclaimer notices
-- **No warranty**: the author provides no express or implied warranty (see GPL-3.0 sections 15 and 16)
+- **Copyleft**: when distributing this software or a derivative work you must provide the complete corresponding source and license the derivative under the **same license**.
+- **Preserve notices**: you may not remove the copyright, license, or disclaimer notices.
+- **No warranty**: the author provides no express or implied warranty (see GPL-3.0 sections 15 and 16).
 
-The full license text is in [`LICENSE`](LICENSE) at the repository root (copyright header on top,
-verbatim GPL-3.0 body below); every source file carries an `SPDX-License-Identifier: GPL-3.0-or-later` header.
+The full license text is in [`LICENSE`](LICENSE) at the repository root. Repository: <https://github.com/zmw-zmw/ghprobe>.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // hosts 片段生成 + 事务化提权写入 + 还原 + DNS 缓存刷新
 import fs from "node:fs";
@@ -9,6 +9,13 @@ import { execFile } from "node:child_process";
 export const WIN_HOSTS = "C:\\Windows\\System32\\drivers\\etc\\hosts";
 const BEGIN = "# === ghprobe begin ===";
 const END = "# === ghprobe end ===";
+
+// 用户级数据目录（日志、无窗口包装器）。放 %LOCALAPPDATA% 而不是包目录：
+// npm 全局安装时包目录在 node_modules 下，npm 升级/重装会整个换掉。
+export function userDataDir() {
+  const base = process.env.LOCALAPPDATA || path.join(os.homedir(), ".ghprobe");
+  return path.join(base, "ghprobe");
+}
 
 // 写 hosts 跨进程锁：probe --apply 与计划任务（health --apply）可能并发，避免读改写互踩
 export const HOSTS_LOCK = path.join(os.tmpdir(), "ghprobe-hosts.lock");
@@ -107,7 +114,7 @@ export function buildUninstallTaskScript(taskName = "ghprobe") {
 // 构造「写入 hosts + 注册计划任务」的提权脚本（install 用）：一次 UAC 完成两件事。
 // 与 buildApplyScript 的区别：中途不 exit，两件事都做完后再按综合结果返回退出码，
 // 这样 install 只需弹一次 UAC，且能拿到「两件事各自成功与否」的确定结果。
-export function buildInstallScript({ hostsPath, tmpPath, nodePath, binPath, cfgArg = "", minutes = 5, writeHosts = true }) {
+export function buildInstallScript({ hostsPath, tmpPath, nodePath, binPath, cfgArg = "", minutes = 1, writeHosts = true, vbsPath = "" }) {
   const bak = `${hostsPath}.ghprobe-bak`;
   const hostsPart = writeHosts ? `
 try {
@@ -121,6 +128,12 @@ try {
   [Console]::Error.WriteLine('hosts 写入失败: ' + $_.Exception.Message)
 }
 if ($hostsOk) { ipconfig /flushdns | Out-Null }` : "";
+  // 任务动作二选一：
+  // ① 有 VBS 包装器（默认）→ 用 wscript.exe 跑它，VBS 内以 SW_HIDE 启动 node —— 全程无窗口；
+  // ② 没有（老调用方 / 包装器写失败）→ 直接跑 node，功能不受影响，但会闪一个控制台窗口。
+  const actionLine = vbsPath
+    ? `$a = New-ScheduledTaskAction -Execute "$env:SystemRoot\\System32\\wscript.exe" -Argument ('"' + '${vbsPath}' + '"')`
+    : `$a = New-ScheduledTaskAction -Execute '${nodePath}' -Argument '"${binPath}" health --apply${cfgArg}'`;
   return `
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
@@ -132,7 +145,7 @@ $hostsOk = $${writeHosts ? "false" : "true"}
 ${hostsPart}
 $taskOk = $false
 try {
-  $a = New-ScheduledTaskAction -Execute '${nodePath}' -Argument '"${binPath}" health --apply${cfgArg}'
+  ${actionLine}
   $t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${minutes})
   $p = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\$env:USERNAME" -LogonType Interactive -RunLevel Highest
   Register-ScheduledTask -TaskName ghprobe -Action $a -Trigger $t -Principal $p -Force | Out-Null
@@ -145,10 +158,48 @@ exit 1
 `;
 }
 
+// 构造「无窗口运行」包装器（VBScript）。
+// 为什么需要它：Task Scheduler 在交互会话里启动控制台程序（node.exe）会**必然**新建一个
+// 控制台窗口，而 node.exe 没有任何「隐藏窗口」开关（不像 powershell 有 -WindowStyle Hidden）。
+// 唯一可靠的做法是让 wscript.exe 起一层：WScript.Shell.Run 的第二个参数是 ShowWindow 风格，
+// 传 0 = SW_HIDE，且该方式自 Win7 起一直有效。第三个参数 True = 等子进程结束再退出。
+// VBS 字符串里 `"` 要写成 `""`（成对双写），所以路径里的引号要整体转义一遍。
+export function buildHiddenRunnerVbs(nodePath, binPath, args = "") {
+  const cmd = `"${nodePath}" "${binPath}"${args ? " " + args : ""}`;
+  return [
+    "' ghprobe 无窗口运行包装器（由 ghprobe install 生成，请勿手改；ghprobe uninstall 会删除它）",
+    'Set sh = CreateObject("WScript.Shell")',
+    `sh.Run "${cmd.replace(/"/g, '""')}", 0, True`,
+    "",
+  ].join("\r\n");
+}
+
+// 判断当前进程是否已经有管理员权限：hosts 是只有管理员能写的系统文件，
+// 用「以读写方式打开」做探测，成功即已提权。比 spawn 一个 PowerShell 去查 token 便宜得多，
+// 而且不产生任何窗口。已提权时 applyHosts 直接跑脚本，不再走 Start-Process -Verb RunAs
+// （那条路会再拉一个新控制台窗口，无窗口运行就破了）。
+export function isElevated(hostsPath = WIN_HOSTS) {
+  try { fs.closeSync(fs.openSync(hostsPath, "r+")); return true; } catch { return false; }
+}
+
 // 跑一段 PowerShell 命令，回传 { code, out, err }
 function runPowerShellCommand(cmd) {
   return new Promise((resolve, reject) => {
-    const child = execFile("powershell", ["-NoProfile", "-Command", cmd], { windowsVerbatimArguments: true });
+    const child = execFile("powershell", ["-NoProfile", "-Command", cmd], { windowsVerbatimArguments: true, windowsHide: true });
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (d) => { out += d; });
+    child.stderr?.on("data", (d) => { err += d; });
+    child.on("close", (code) => resolve({ code, out, err }));
+    child.on("error", reject);
+  });
+}
+
+// 直接执行一个 .ps1（调用方保证已经提权）。windowsHide 让 powershell 以 CREATE_NO_WINDOW
+// 启动，不闪窗；被提升的父进程若本身就在隐藏控制台里，子进程也是继承而非新建。
+function runPowerShellFile(file) {
+  return new Promise((resolve, reject) => {
+    const child = execFile("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file], { windowsHide: true });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => { out += d; });
@@ -172,11 +223,14 @@ export function writePs1WithBom(file, content) {
   fs.writeFileSync(file, "\ufeff" + content, "utf8");
 }
 
-// 写临时 ps1 -> 弹 UAC 提权执行 -> 取回被提升进程 ExitCode -> 清理 ps1（apply/restore/install 复用）
+// 写临时 ps1 -> 提权执行 -> 取回退出码 -> 清理 ps1（apply/restore/install 复用）。
+// 已经提权时（计划任务 runlevel=highest）直接执行脚本，不走 Start-Process -Verb RunAs ——
+// 后者会再拉一个独立控制台窗口，是「无窗口运行」的第二个破口。
 export async function runElevated(content) {
   const tmp = path.join(os.tmpdir(), `ghprobe-${Date.now()}.ps1`);
   writePs1WithBom(tmp, content);
   try {
+    if (isElevated()) { return await runPowerShellFile(tmp); }
     return await runElevationWrapper("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp]);
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }

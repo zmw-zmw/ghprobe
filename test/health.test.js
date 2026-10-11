@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 调度层离线单测：解析/序列化/决策/部分更新/全灭护栏（不联网、不写系统文件）
 import { test } from "node:test";
@@ -181,6 +181,31 @@ test("applyDelta: 缺失域名探到活 IP -> 补写并清除 absent", () => {
   assert.equal(d.entries.get("raw.githubusercontent.com"), "9.9.9.9");
   assert.equal(d.absent.has("raw.githubusercontent.com"), false);
   assert.deepEqual(d.changed, ["raw.githubusercontent.com"]);
+});
+
+// stuck：被诊断了、本轮却一个活 IP 都没找到、只能保留旧值的域名。
+// 黑洞窗口里必然出现，必须显式报出来 —— 否则日志只写「无变化」，用户会以为工具没干活。
+test("applyDelta: stuck——诊断过但无活 IP，保留旧值并显式列出", () => {
+  const current = {
+    entries: new Map([["github.com", "旧ip"], ["codeload.github.com", "旧codeload"]]),
+    absent: new Map(),
+  };
+  const ranked = new Map([["github.com", []], ["codeload.github.com", [{ ip: "新codeload" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["github.com"], cfg);
+  assert.equal(d.entries.get("github.com"), "旧ip", "全灭护栏：不写空");
+  assert.deepEqual(d.stuck, ["github.com"]);
+  assert.deepEqual(d.changed, []);
+});
+
+test("applyDelta: orphan 被删掉，不计入 stuck（它本来就是要清理的）", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"], ["old.example.com", "9.9.9.9"]]),
+    absent: new Map(),
+  };
+  const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["old.example.com"], cfg);
+  assert.equal(d.entries.has("old.example.com"), false);
+  assert.deepEqual(d.stuck, [], "orphan 是清理对象，不是「没探到活 IP」");
 });
 
 const fbCfg = {

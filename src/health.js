@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 调度层：健康检查（哨兵）+ 决策 + 部分更新 + 全灭护栏
 // 无状态文件：缺失域名冷却表直接编码进 hosts 块注释，跨进程、跨重启不丢
@@ -103,6 +103,8 @@ export function decide(probeResults, current, cfg) {
 
 // 部分更新（纯函数）：只改 diagnose 域名；全灭护栏保证不把好 IP 写成空
 // 返回的新 entries/absent 用于与当前对比，changed 记录真正换掉 IP 的域名
+// stuck：被诊断了、但本轮一个活 IP 都没找到、只能保留旧值的域名（黑洞窗口里必然出现，
+//        显式报出来，否则日志只写「无变化」会让人以为工具没干活）
 export function applyDelta(current, ranked, extra, diagnose, cfg) {
   const entries = new Map(current.entries);
   const absent = new Map(current.absent);
@@ -125,7 +127,9 @@ export function applyDelta(current, ranked, extra, diagnose, cfg) {
   for (const d of [...entries.keys()]) {
     if (!allow.has(d)) { entries.delete(d); changed.push(d); }
   }
-  return { entries, absent, changed };
+  // orphan 已在上一步删掉，这里只剩「配置内、诊断过、却没探到活 IP、于是保留旧值」的域名
+  const stuck = diagnose.filter((d) => allow.has(d) && entries.has(d) && !(allResult.get(d) || []).length);
+  return { entries, absent, changed, stuck };
 }
 
 function sameMap(a, b) {
@@ -155,24 +159,27 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS) 
   const decision = decide(probeResults, current, cfg);
   if (decision.action === "none") {
     say(`健康：${decision.reason}`);
-    return { action: "none", reason: decision.reason, block: null };
+    return { action: "none", reason: decision.reason, block: null, stuck: [] };
   }
 
   say(`异常：${decision.reason}`);
   return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath);
 }
 
-// 全量探测 + 部分更新 + 写回；护栏与粘性都在 applyDelta 里体现
+// 全量探测 + 部分更新 + 写回；护栏与粘性都在 applyDelta 里体现。
+// 只探 diagnose 里的域名：典型场景是「github.com 的 IP 死了，codeload / jsdelivr 还活着」，
+// 此时探 1 个域名（~8 个候选）而不是 6 个（~48 个），失败发现到修好的时间从 ~90s 压到 ~20s。
 async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS) {
   const say = log || (() => {});
-  const r = await runProbe(cfg, log);
+  const r = await runProbe(cfg, log, diagnose);
   const d = applyDelta(current, r.ranked, r.extra, diagnose, cfg);
 
   const entriesChanged = !sameMap(d.entries, current.entries);
   const absentChanged = !sameMap(d.absent, current.absent);
+  const stuckNote = d.stuck.length ? `；无可用 IP 保留原值: ${d.stuck.join(", ")}` : "";
   if (!entriesChanged && !absentChanged) {
-    say("探测无变化，保持现状（护栏/粘性生效）");
-    return { action: "none", reason: "无变化", block: null };
+    say(`探测无变化，保持现状（护栏/粘性生效）${stuckNote}`);
+    return { action: "none", reason: `无变化${stuckNote}`, block: null, stuck: d.stuck };
   }
 
   const block = buildHealthBlock(d.entries, d.absent);
@@ -181,16 +188,16 @@ async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath
     const lock = acquireHostsLock();
     if (!lock) {
       say("另一进程正在写 hosts，本轮跳过（下轮健康检查会自动补写）");
-      return { action: "none", reason: "写锁冲突，本轮跳过", changed: d.changed, block };
+      return { action: "none", reason: "写锁冲突，本轮跳过", changed: d.changed, block, stuck: d.stuck };
     }
     try {
       // 锁内重读最新 hosts：探测耗时期间他人可能已改过，避免覆盖别人刚写的新值
       const latest = fs.readFileSync(hostsPath, "utf8");
       await applyHosts(mergeHosts(latest, block));
-      say(`已写入 hosts：${msg}`);
+      say(`已写入 hosts：${msg}${stuckNote}`);
     } finally { releaseHostsLock(lock); }
   } else {
     say(`预览块（加 --apply 才写入）:\n${block}`);
   }
-  return { action: "full", reason: msg, changed: d.changed, block };
+  return { action: "full", reason: msg, changed: d.changed, block, stuck: d.stuck };
 }
