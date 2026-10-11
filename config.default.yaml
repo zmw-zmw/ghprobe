@@ -1,0 +1,31 @@
+# ghprobe 默认配置（用户可用 --config 覆盖，键名一致即可）
+# 目标域名族：每域名独立探测、独立写 hosts
+domains:
+  - github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  - raw.githubusercontent.com
+  - gist.githubusercontent.com
+  - avatars.githubusercontent.com
+
+# DoH 端点（全部 IP 直连，绕开解析 DoH 域名的死锁；默认只放国内实测可达端点）
+# sni 填服务域名：TLS 握手按它验证书（RFC 6066 不允许拿 IP 当 SNI）
+doh:
+  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
+  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
+  - { name: dnspod, host: 1.12.12.12, sni: doh.pub, path: /dns-query }
+
+# 内置候选 IP 池：与域名无关地全量进候选，由 TLS 证书终审 + 应用层终审共同判定归属
+# fastly 段服务 githubusercontent 系，azure 段服务 github.com 系
+ipPools:
+  fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
+  azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
+
+# 被主机名黑名单掐掉的域名走兜底链：主候选全灭时改探测这些替身域名并写入
+fallbacks:
+  raw.githubusercontent.com: [cdn.jsdelivr.net]
+
+timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
+probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
+serve: { host: 127.0.0.1, port: 8930 }
+schedule: { intervalHours: 6 }

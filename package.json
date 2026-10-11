@@ -1,0 +1,19 @@
+{
+  "name": "ghprobe",
+  "version": "0.1.0",
+  "description": "GitHub direct-connect optimizer: local DoH resolution + TLS-verified probing + hosts generation (no proxy)",
+  "type": "module",
+  "bin": { "ghprobe": "bin/ghprobe.js" },
+  "main": "bin/ghprobe.js",
+  "engines": { "node": ">=18" },
+  "license": "GPL-3.0",
+  "scripts": {
+    "test": "node --test",
+    "serve": "node bin/ghprobe.js serve",
+    "probe": "node bin/ghprobe.js probe"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "js-yaml": "^4.1.0"
+  }
+}
