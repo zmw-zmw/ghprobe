@@ -338,54 +338,34 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 ## 5. About "why is cdn.jsdelivr.net in there?"
 
-A user asked: **"This tool is meant to speed up GitHub specifically — why does it accelerate other domestic mirrors?"**
+**`cdn.jsdelivr.net` is not a domestic mirror.** It is the jsDelivr public CDN (running on Cloudflare). It appears in hosts for exactly one reason: the **fallback chain**.
 
-First, the wording: **`cdn.jsdelivr.net` is not a "domestic mirror."** It is the jsDelivr CDN (running on Cloudflare), a global public CDN — a different thing entirely from a "domestic mirror site."
-
-Why does it appear in hosts at all? **The only reason is the fallback chain.**
-
-Recall the fault layering from section 1: one fault type is the **SNI hostname blacklist** — what is blocked is the **hostname itself**. In that case the SNI in the TLS handshake carries the blocked domain, and **no IP will help**: you can switch to an IP on the other side of the planet and the client still has to name the blocked domain during the handshake, so it gets cut off just the same. The only way out is to **change the domain** and fetch the same content from elsewhere.
-
-jsDelivr exposes a path that maps a GitHub repository file directly:
+One fault type is the **SNI hostname blacklist** — what is blocked is the hostname itself. The SNI in the TLS handshake carries that domain, so **no IP will help**; the only way out is to **change the domain**. jsDelivr maps GitHub files directly:
 
 ```text
-https://cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>
+raw.githubusercontent.com/<user>/<repo>/<ref>/<path>
+cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>     <- same content
 ```
 
-In other words, the exact file content at `raw.githubusercontent.com/<user>/<repo>/<ref>/<path>` can be fetched from `cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>` — it is "the same content at another reachable entry point." So when `raw.githubusercontent.com` is SNI-blocked and all primary candidates are dead, ghprobe uses jsDelivr as a **fallback entry point**, so such files still have a route.
+So when `raw.githubusercontent.com` is SNI-blocked and all primary candidates are dead, ghprobe falls back to it.
 
-**Caveats that must be stated:**
+Caveats:
 
-- **In the default config, only `raw.githubusercontent.com` has this fallback:**
+- By default only `raw.githubusercontent.com` has a fallback; `github.com` / `codeload.github.com` never use one.
+- It fires only when the primary candidates are **entirely dead** — any live IP and the fallback domain is never probed.
+- What gets written is the `cdn.jsdelivr.net` IP — this rescues "change the domain," not "change the IP."
 
-  ```yaml
-  fallbacks:
-    raw.githubusercontent.com: [cdn.jsdelivr.net]
-  ```
+To remove it, empty `fallbacks` (`--config` merges recursively, so an empty object works):
 
-- **The primary domains `github.com` / `codeload.github.com` never use a fallback.** They only pick IPs within the official domain family.
-- **The fallback fires only when the primary candidates are entirely dead.** As long as the primary domain has any live IP, the fallback domain is never probed.
-- When the fallback hits, the IP written is that of the **fallback domain** (i.e. `cdn.jsdelivr.net`), not `raw.githubusercontent.com` — because what's being saved here is "change the domain," not "change the IP."
+```yaml
+fallbacks: {}
+```
 
-**If you don't want this fallback**, you can remove it entirely:
+```bash
+ghprobe install -c my.yaml
+```
 
-- Edit `config.default.yaml` and empty the `fallbacks` section:
-
-  ```yaml
-  fallbacks: {}
-  ```
-
-- Or override it with your own `--config` (objects merge recursively, so just give an empty object for `fallbacks`):
-
-  ```yaml
-  fallbacks: {}
-  ```
-
-  ```bash
-  ghprobe install -c my.yaml
-  ```
-
-After removing it, the tool uses **only official GitHub domains**. The cost: once `raw.githubusercontent.com` is SNI-blocked, that class of files has no alternative entry point at all (this is a property of that network environment, not something the tool can route around).
+The cost: once `raw.githubusercontent.com` is SNI-blocked, that class of files has no alternative entry point.
 
 ---
 
