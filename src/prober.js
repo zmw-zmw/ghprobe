@@ -140,10 +140,30 @@ export function checkHttpResponse(statusCode, body, location, sig) {
   return { ok: false, err: `status:${statusCode}` };
 }
 
+// 未在 DOMAIN_SIG 里声明、也没有配置判据时的兜底判据
+const DEFAULT_SIG = {
+  path: "/",
+  mustContain: [],
+  allow: [200, 204, 301, 302, 303, 304, 307, 308],
+  reject: ["unknown domain", "Fastly error", "bad request"],
+  redirectHosts: [],
+};
+
+// 取某域名的探测判据：**配置里 fallbackSigs 声明的优先于代码里的 DOMAIN_SIG**。
+// 🔴 为什么替身域名必须能自带判据：不同替身服务的 URL 形态不同 ——
+//    CDN 映射是 `/gh/<user>/<repo>@<ref>/<path>`，代理是 `/<完整原始 URL>` ——
+//    判据没法写死在代码里，用户新增一个替身也不该被要求改源码。
+export function sigFor(domain, cfg) {
+  const override = cfg?.fallbackSigs?.[domain];
+  const base = DOMAIN_SIG[domain];
+  if (!base && !override) { return DEFAULT_SIG; }
+  return { ...DEFAULT_SIG, ...(base || {}), ...(override || {}) };
+}
+
 // 第三关：HTTP GET（host=IP、SNI=域名、Host头=域名），读少量响应体做终审
-function httpProbe(ip, domain, httpMs) {
+function httpProbe(ip, domain, httpMs, cfg) {
   return new Promise((resolve) => {
-    const sig = DOMAIN_SIG[domain] || { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308], reject: ["unknown domain", "Fastly error", "bad request"], redirectHosts: [] };
+    const sig = sigFor(domain, cfg);
     const t0 = Date.now();
     const req = https.request({
       host: ip, servername: domain, method: "GET", path: sig.path, timeout: httpMs,
@@ -186,7 +206,7 @@ export async function probeIp(domain, ip, cfg) {
   if (!g.ok) {
     return { domain, ip, ok: false, stage: g.stage, err: g.err, tlsBlocked: looksLikeTlsBlocked(g) };
   }
-  const h = await httpProbe(ip, domain, httpMs);
+  const h = await httpProbe(ip, domain, httpMs, cfg);
   const tlsCost = g.tlsMs - g.tcpMs;
   const score = Math.round(g.tcpMs * 0.4 + tlsCost * 0.4 + (h.ok ? h.ttfb : httpMs) * 0.2);
   return {

@@ -160,7 +160,8 @@ The last layer needs its own explanation, because it is the most easily misunder
 
 **Same IP, same hostname, only the client changes — and the success rate drops from 100% to 15%.** So the block keys on the **shape of the TLS ClientHello** (extension list, order, length) — not on the hostname itself, and not on the IP. Two consequences:
 
-1. **Changing the IP cannot fix it** — only changing the domain can (which is why there is a fallback chain: `raw.githubusercontent.com -> cdn.jsdelivr.net`).
+1. **Changing the IP cannot fix it** — only changing the domain can. That is why there is a **fallback chain**
+   with **several alternative candidates** (the fallbacks get blocked too): see section 6.
 2. **This tool's probe results do not fully represent your experience** — ghprobe is Node, and its TLS fingerprint differs from your browser's. Measured: `raw.githubusercontent.com` opens fine in a browser, while the Node probe gets `ECONNRESET` on every candidate. In that case the tool writes `# blocked` (not `# absent`), meaning **inconclusive** rather than "unreachable":
 
    ```text
@@ -478,26 +479,55 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 ---
 
-## 6. About "why is cdn.jsdelivr.net in there?"
+## 6. The fallback chain: why cdn.jsdelivr.net / ghproxy.net show up in hosts
 
-**`cdn.jsdelivr.net` is not a domestic mirror.** It is the jsDelivr public CDN (running on Cloudflare). It appears in hosts for exactly one reason: the **fallback chain**.
+Besides the primary domains like `github.com`, ghprobe maintains a **fallback chain** for
+hostname-blocked domains: when every primary candidate is dead, it probes alternative entry
+domains and writes **whichever works right now** into hosts.
 
-One fault type is the **SNI hostname blacklist** — what is blocked is the hostname itself. The SNI in the TLS handshake carries that domain, so **no IP will help**; the only way out is to **change the domain**. jsDelivr maps GitHub files directly:
+**Why the domain has to change**: one layer of blocking cannot be fixed by changing the IP —
+what is blocked is not the IP but the **shape of the ClientHello** in the TLS handshake
+(measurements in section 3, "Limits"). No IP will help there; only a **different, unblocked
+entry domain** will. GitHub file content has several equivalent entry points:
 
 ```text
-raw.githubusercontent.com/<user>/<repo>/<ref>/<path>
-cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>     <- same content
+raw.githubusercontent.com/<user>/<repo>/<ref>/<path>   <- the original (often blocked)
+cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         <- jsDelivr public CDN, same content
+ghproxy.net/https://raw.githubusercontent.com/<...>    <- third-party GitHub proxy
 ```
 
-So when `raw.githubusercontent.com` is SNI-blocked and all primary candidates are dead, ghprobe falls back to it.
+**Why several candidates**: the fallback domains get blocked too. Measured at the same moment:
+`cdn.jsdelivr.net` accepted TCP but had its TLS handshake cut. So the config ships a set of
+candidates and the probe **picks whichever works right now** (if several work, all are written
+and the client chooses). Three by default:
 
-Caveats:
+| Fallback | Type | Note |
+| --- | --- | --- |
+| `cdn.jsdelivr.net` | jsDelivr public CDN (Cloudflare) | path mapping `/gh/<user>/<repo>@<ref>/<path>` |
+| `ghproxy.net` | third-party GitHub proxy | your requests go through their server |
+| `gh-proxy.com` | third-party GitHub proxy | same |
+
+> **A third-party proxy can see which files you requested.** Delete those two if that bothers
+> you and keep only `cdn.jsdelivr.net`.
+
+Behaviour and prerequisites:
 
 - By default only `raw.githubusercontent.com` has a fallback; `github.com` / `codeload.github.com` never use one.
-- It fires only when the primary candidates are **entirely dead** — any live IP and the fallback domain is never probed.
-- What gets written is the `cdn.jsdelivr.net` IP — this rescues "change the domain," not "change the IP."
+- It fires only when the primary candidates are **entirely dead** — any live IP and the fallback is never probed.
+- What gets written is the **fallback domain's** IP: this rescues "change the domain", not "change the IP".
+  You access it through the fallback URL form.
+- Fallbacks carry their **own probe signature** (path + required response content), declared in config
+  rather than code — so you can add your own without touching the source:
 
-To remove it, empty `fallbacks` (`--config` merges recursively, so an empty object works):
+```yaml
+fallbacks:
+  raw.githubusercontent.com:
+    - cdn.jsdelivr.net
+    # Add your own: gate 3 uses path + mustContain to verify this IP really serves this content
+    - { domain: my.mirror.example, path: "/gh/torvalds/linux@master/README", mustContain: ["Linux kernel"] }
+```
+
+To remove the fallback, empty it (`--config` merges recursively, so an empty object works):
 
 ```yaml
 fallbacks: {}
@@ -506,8 +536,6 @@ fallbacks: {}
 ```bash
 ghprobe install -c my.yaml
 ```
-
-The cost: once `raw.githubusercontent.com` is SNI-blocked, that class of files has no alternative entry point.
 
 ---
 

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, userConfigPath, ensureUserConfig } from "../src/config.js";
+import { loadConfig, userConfigPath, ensureUserConfig, normalizeFallbacks } from "../src/config.js";
 
 function withUserYaml(body, fn) {
   const tmp = path.join(os.tmpdir(), `ghprobe-config-test-${Date.now()}.yaml`);
@@ -70,4 +70,54 @@ test("loadConfig: 用户目录 config.yaml 生效，且深合并保留未覆盖�
   } finally {
     fs.unlinkSync(p);
   }
+});
+
+// ============================================================================
+// 2026-10-11 新增：fallbacks 支持「自带探测判据」的完整写法
+// 动机：兜底域名本身也会被封（实测 cdn.jsdelivr.net 在当前网络下 TLS 被掐），
+//       所以要给多个候选；而不同替身的 URL 形态不同（CDN 映射 vs 代理前缀），
+//       判据不能写死在代码里 —— 必须跟着配置走。
+// ============================================================================
+
+test("normalizeFallbacks: 简写（字符串）保持原语义", () => {
+  const cfg = normalizeFallbacks({ fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net"] } });
+  assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net"]);
+  assert.deepEqual(cfg.fallbackSigs, {}, "简写不带判据");
+});
+
+test("normalizeFallbacks: 完整写法抽出 domain 与判据", () => {
+  const cfg = normalizeFallbacks({
+    fallbacks: {
+      "raw.githubusercontent.com": [
+        "cdn.jsdelivr.net",
+        { domain: "ghproxy.net", path: "/https://raw.githubusercontent.com/torvalds/linux/master/README", mustContain: ["Linux kernel"] },
+      ],
+    },
+  });
+  assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "ghproxy.net"]);
+  assert.equal(cfg.fallbackSigs["ghproxy.net"].path, "/https://raw.githubusercontent.com/torvalds/linux/master/README");
+  assert.deepEqual(cfg.fallbackSigs["ghproxy.net"].mustContain, ["Linux kernel"]);
+  assert.equal(cfg.fallbackSigs["cdn.jsdelivr.net"], undefined);
+});
+
+test("normalizeFallbacks: 只给 domain 不带判据时不产生空 sig", () => {
+  const cfg = normalizeFallbacks({ fallbacks: { "a.com": [{ domain: "b.com" }] } });
+  assert.deepEqual(cfg.fallbacks["a.com"], ["b.com"]);
+  assert.deepEqual(cfg.fallbackSigs, {});
+});
+
+test("normalizeFallbacks: 缺 fallbacks 段时不炸", () => {
+  const cfg = normalizeFallbacks({});
+  assert.deepEqual(cfg.fallbacks, {});
+  assert.deepEqual(cfg.fallbackSigs, {});
+});
+
+test("loadConfig: 默认配置的 raw 兜底有多个候选且带判据", () => {
+  const cfg = loadConfig();
+  const list = cfg.fallbacks["raw.githubusercontent.com"];
+  assert.ok(list.length >= 2, "应给多个候选（单个被封时还有备选）");
+  assert.ok(list.includes("cdn.jsdelivr.net"));
+  // 代理型替身自带判据
+  assert.ok(cfg.fallbackSigs["ghproxy.net"], "代理型替身必须自带 path/mustContain");
+  assert.ok(cfg.fallbackSigs["ghproxy.net"].path.startsWith("/https://"));
 });

@@ -40,6 +40,38 @@ function withPoolCache(cfg) {
   return cfg;
 }
 
+// fallbacks 归一化：既支持简写 `[域名]`，也支持完整写法 `[{ domain, path, mustContain }]`。
+// 归一化后：
+//   cfg.fallbacks    = { 主域名: [替身域名...] }          —— 下游（targetDomains / neededFallbacks）不用改
+//   cfg.fallbackSigs = { 替身域名: { path, mustContain } } —— 供 prober 用该替身自己的探测判据
+//
+// 🔴 为什么需要：兜底域名本身也可能被封（实测 2026-10-11：`cdn.jsdelivr.net` 在当前网络下
+//    TCP 连得上但 TLS 被掐），所以配置里要给**多个候选**、探测时挑当下能通的那个。
+//    而不同替身服务的 URL 形态不同 —— CDN 映射是 `/gh/<user>/<repo>@<ref>/<path>`，
+//    代理是 `/<完整原始 URL>` —— 判据没法写死在代码里，必须跟着配置走。
+export function normalizeFallbacks(cfg) {
+  const raw = cfg.fallbacks || {};
+  const fallbacks = {};
+  const fallbackSigs = {};
+  for (const [primary, list] of Object.entries(raw)) {
+    const domains = [];
+    for (const item of (Array.isArray(list) ? list : [])) {
+      if (typeof item === "string") { domains.push(item); continue; }
+      if (item && typeof item === "object" && item.domain) {
+        domains.push(item.domain);
+        const sig = {};
+        if (item.path) { sig.path = item.path; }
+        if (Array.isArray(item.mustContain) && item.mustContain.length) { sig.mustContain = item.mustContain; }
+        if (Object.keys(sig).length) { fallbackSigs[item.domain] = sig; }
+      }
+    }
+    fallbacks[primary] = domains;
+  }
+  cfg.fallbacks = fallbacks;
+  cfg.fallbackSigs = fallbackSigs;
+  return cfg;
+}
+
 // 优先级：--config 显式指定 > 用户目录 config.yaml > 包内 config.default.yaml
 export function loadConfig(userPath) {
   const def = yaml.load(fs.readFileSync(path.join(ROOT, "config.default.yaml"), "utf8"));
@@ -48,7 +80,7 @@ export function loadConfig(userPath) {
     if (!p) { continue; }
     try { user = yaml.load(fs.readFileSync(p, "utf8")); break; } catch { /* 不存在 / 读不了 -> 下一个 */ }
   }
-  return withPoolCache(user ? mergeDefaults(def, user) : def);
+  return withPoolCache(normalizeFallbacks(user ? mergeDefaults(def, user) : def));
 }
 
 // 首次 install 时把包内默认配置复制成用户配置（已存在则不覆盖，保留用户改动）

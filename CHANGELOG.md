@@ -5,6 +5,32 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- **兜底链支持多个候选，并挑当下能通的那个**：原来 `fallbacks` 每个主域名只能配一个替身，
+  而替身自己也会被封（实测同一时刻 `cdn.jsdelivr.net` 的 TCP 连得上、TLS 被掐）。
+  现在默认给三个：`cdn.jsdelivr.net`（jsDelivr 公共 CDN）、`ghproxy.net` / `gh-proxy.com`
+  （第三方 GitHub 代理，配置里已注明「请求会经过它们的服务器」，介意可删）。
+- **替身可以自带探测判据**：`fallbacks` 新增完整写法
+  `- { domain, path, mustContain }`，判据写在配置里而不是代码里 ——
+  因为不同替身的 URL 形态不同（CDN 映射 `/gh/<user>/<repo>@<ref>/<path>` vs 代理 `/<完整原始 URL>`），
+  用户新增替身不需要改源码。归一化在 `loadConfig()` 里做，下游（`targetDomains` /
+  `neededFallbacks`）拿到的仍是 `{ 主域名: [替身域名...] }`，无需改动。
+
+### Changed
+
+- `config.default.yaml` 头部补了升级说明：`install` 会把默认配置**整份**复制成用户配置，
+  而用户配置优先 —— 所以**默认值里已有的键，升级后新默认不会自动生效**（新增的键不受影响）。
+- README 第 6 节重写（原「关于为什么还会出现 cdn.jsdelivr.net」）：说明兜底链要解决的是
+  **换 IP 修不了**的那层封锁、为什么需要多个候选、第三方代理的隐私代价、以及怎么自己加替身。
+  并修正了原文「`raw` 被封锁后这类文件没有替代入口」的自相矛盾说法。
+
+### Fixed
+
+- 单测 137 → **145**。
+
 ## [0.1.1] - 2026-10-11
 
 线上实测驱动的三个修复。都是「工具看着在干活、实际把用户搞断网」那一类。

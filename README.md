@@ -160,7 +160,8 @@ ghprobe 的取舍是：**只做「优选 IP + 自动维护」，不碰系统网�
 
 **同一个 IP、同一个主机名，只换客户端，结果从 100% 掉到 15%。** 说明拦截依据是 **TLS ClientHello 的形态**（扩展列表、顺序、长度），既不是主机名本身，也不是 IP。这带来两个后果：
 
-1. **换 IP 修不了它** —— 只能换域名（所以本工具有兜底链：`raw.githubusercontent.com → cdn.jsdelivr.net`）。
+1. **换 IP 修不了它** —— 只能换域名。所以本工具有**兜底链**，而且配了**多个替身候选**
+   （替身自己也会被封）：见第 6 节。
 2. **本工具的探测结果不能完全代表你的体验** —— 它自己是 Node，TLS 指纹和你用的浏览器不同。实测：`raw.githubusercontent.com` 在浏览器里能正常打开，而 Node 探测全部 `ECONNRESET`。遇到这种情况工具会写 `# blocked`（而不是 `# absent`），明确表示**探测不可判**，不是「该域名不可达」：
 
    ```text
@@ -471,26 +472,50 @@ ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自�
 
 ---
 
-## 6. 关于「为什么还会出现 cdn.jsdelivr.net」
+## 6. 兜底链：为什么 hosts 里会出现 cdn.jsdelivr.net / ghproxy.net
 
-**`cdn.jsdelivr.net` 不是国内镜像**，它是 jsDelivr 的公共 CDN（走 Cloudflare）。它进 hosts 的唯一原因是**兜底链**。
+除了 `github.com` 这类主域名，ghprobe 还会给**被主机名封锁**的域名配一条**兜底链**：
+主候选全灭时改探测替身域名，并把**当下能通的那个**写进 hosts。
 
-有一种故障是 **SNI 主机名黑名单** —— 被封锁的是主机名本身，TLS 握手里的 SNI 带着那个域名，**换任何 IP 都没用**，只能**换域名**。jsDelivr 提供 GitHub 文件的直接映射：
+**为什么必须换域名**：有一层封锁是「换 IP 修不了」的 —— 被拦的不是 IP，而是 TLS 握手里
+ClientHello 的形态（实测数据见 §3「边界」）。这种时候换任何 IP 都没用，只能**换一个不被拦的入口域名**。
+而 GitHub 的文件内容有几个等价入口：
 
 ```text
-raw.githubusercontent.com/<user>/<repo>/<ref>/<path>
-cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>     ← 同一份内容
+raw.githubusercontent.com/<user>/<repo>/<ref>/<path>   ← 原始入口（常被拦）
+cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         ← jsDelivr 公共 CDN，同一份内容
+ghproxy.net/https://raw.githubusercontent.com/<...>    ← 第三方 GitHub 代理
 ```
 
-所以当 `raw.githubusercontent.com` 被 SNI 封锁、主候选全灭时，ghprobe 用它兜底。
+**为什么配多个候选**：替身域名自己也会被封。实测同一时刻 `cdn.jsdelivr.net` 的 TCP 连得上、
+但 TLS 被掐 —— 所以配置里给一组候选，探测时**挑当下能通的**（能通多个就都写上，客户端自己选）。
+默认三个：
 
-前提：
+| 替身 | 类型 | 说明 |
+| --- | --- | --- |
+| `cdn.jsdelivr.net` | jsDelivr 公共 CDN（Cloudflare） | 路径映射 `/gh/<user>/<repo>@<ref>/<path>` |
+| `ghproxy.net` | ⚠️ 第三方 GitHub 代理 | 请求会经过它的服务器 |
+| `gh-proxy.com` | ⚠️ 第三方 GitHub 代理 | 同上 |
+
+> ⚠️ **第三方代理能看到你请求了哪些文件。** 介意的话把这两条删掉，只留 `cdn.jsdelivr.net`。
+
+行为与前提：
 
 - 默认只有 `raw.githubusercontent.com` 配了兜底；`github.com` / `codeload.github.com` 从不走兜底。
-- 只在主候选**全灭**时触发，有任一活 IP 就不探兜底。
-- 命中后写入的是 `cdn.jsdelivr.net` 的 IP —— 救的是「换域名」，不是「换 IP」。
+- 只在主候选**全灭**时触发；有任一活 IP 就不探兜底。
+- 写入的是**替身域名**的 IP —— 救的是「换域名」，不是「换 IP」。访问时要换成替身的 URL 形式。
+- 替身**自带探测判据**（路径 + 响应里必须出现的内容），写在配置里而不是代码里 ——
+  所以你可以自己加替身，不需要改源码：
 
-不想要就清空 `fallbacks`（`--config` 覆盖是递归合并，给空对象即可）：
+```yaml
+fallbacks:
+  raw.githubusercontent.com:
+    - cdn.jsdelivr.net
+    # 自己加一个：第三关用 path + mustContain 验证「这个 IP 真的在提供这份内容」
+    - { domain: my.mirror.example, path: "/gh/torvalds/linux@master/README", mustContain: ["Linux kernel"] }
+```
+
+不想要兜底就清空（`--config` 覆盖是递归合并，给空对象即可）：
 
 ```yaml
 fallbacks: {}
@@ -499,8 +524,6 @@ fallbacks: {}
 ```bash
 ghprobe install -c my.yaml
 ```
-
-代价：`raw.githubusercontent.com` 被 SNI 封锁后，这类文件没有替代入口。
 
 ---
 

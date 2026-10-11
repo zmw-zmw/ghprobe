@@ -3,7 +3,7 @@
 // prober 应用层终审单测：不连真实网络，只校验判定函数
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DOMAIN_SIG, checkHttpResponse, looksLikeTlsBlocked } from "../src/prober.js";
+import { DOMAIN_SIG, checkHttpResponse, looksLikeTlsBlocked, sigFor } from "../src/prober.js";
 
 const gh = DOMAIN_SIG["github.com"];
 const codeload = DOMAIN_SIG["codeload.github.com"];
@@ -131,4 +131,26 @@ test("looksLikeTlsBlocked: TCP 阶段就失败 / 成功 / 证书错误 -> 不算
   assert.equal(looksLikeTlsBlocked({ ok: true }), false);
   // 证书不匹配属于「IP 服务了别的域名」，不是指纹问题
   assert.equal(looksLikeTlsBlocked({ ok: false, stage: "tls", err: "ERR_TLS_CERT_ALTNAME_INVALID" }), false);
+});
+
+test("sigFor: 代码里的 DOMAIN_SIG 优先于默认判据", () => {
+  const sig = sigFor("github.com", {});
+  assert.equal(sig.path, "/");
+  assert.deepEqual(sig.mustContain, ["github"]);
+});
+
+test("sigFor: 配置里的 fallbackSigs 覆盖代码判据（替身域名自带判据）", () => {
+  const cfg = { fallbackSigs: { "ghproxy.net": { path: "/https://raw.githubusercontent.com/x/y/master/z", mustContain: ["Linux kernel"] } } };
+  const sig = sigFor("ghproxy.net", cfg);
+  assert.equal(sig.path, "/https://raw.githubusercontent.com/x/y/master/z");
+  assert.deepEqual(sig.mustContain, ["Linux kernel"]);
+  // 未声明的字段沿用默认值，不会因为覆盖而丢
+  assert.ok(Array.isArray(sig.allow) && sig.allow.includes(200));
+  assert.ok(Array.isArray(sig.reject) && sig.reject.includes("bad request"));
+});
+
+test("sigFor: 未知域名（配置也没声明）退回默认判据", () => {
+  const sig = sigFor("whatever.example", {});
+  assert.equal(sig.path, "/");
+  assert.deepEqual(sig.mustContain, []);
 });
