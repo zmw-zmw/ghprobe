@@ -1,6 +1,7 @@
 # ghprobe
 
 [![ci](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ghprobe.svg)](https://www.npmjs.com/package/ghprobe)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)](README.en.md#requirements-and-faq)
@@ -256,7 +257,7 @@ ghprobe uninstall   # stop: remove the scheduled task and restore hosts
 
    The two steps are independent — a failure in either does not affect the other, and the process exits non-zero on failure.
 
-> If the package is not published to npm yet, run `npm install -g .` inside the repository directory for the same effect.
+> Published on npm: <https://www.npmjs.com/package/ghprobe>. You can also install from source — run `npm install -g .` inside the repository directory.
 
 ### Option 2: clone and one-click deploy
 

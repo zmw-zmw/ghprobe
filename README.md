@@ -1,6 +1,7 @@
 # ghprobe
 
 [![ci](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ghprobe.svg)](https://www.npmjs.com/package/ghprobe)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)](README.md#系统要求与常见问题)
@@ -249,7 +250,7 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 
    两步互相独立，任一步失败不影响另一步，失败时以非零退出码结束。
 
-> 包尚未发布到 npm 时，可在仓库目录执行 `npm install -g .` 达到同样效果。
+> 已发布到 npm：<https://www.npmjs.com/package/ghprobe>。也可从源码安装 —— 在仓库目录执行 `npm install -g .`。
 
 ### 方式二：克隆仓库一键部署
 
