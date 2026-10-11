@@ -1,5 +1,10 @@
 # ghprobe
 
+[![ci](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)](README.en.md#requirements-and-faq)
+
 English | [简体中文](README.md)
 
 **A Windows command-line tool that speeds up direct connections to GitHub: it measures the IPs that actually work on *your* network right now, writes them into your hosts file, and swaps them out automatically when they die. No proxy, no system proxy changes, no traffic hijacking.**
@@ -10,6 +15,16 @@ The problem it solves is concrete: GitHub direct connections are sometimes fast,
 - Touches **the hosts file only** — installs no proxy / driver / service
 - Requires **Node.js ≥ 18**
 - License **GPL-3.0-only**, author **zmw**, repository <https://github.com/zmw-zmw/ghprobe>
+
+## Quick start
+
+```bash
+npm install -g ghprobe
+ghprobe install     # probe once + write hosts + register the per-minute health check (a single UAC prompt)
+ghprobe uninstall   # stop: remove the scheduled task and restore hosts
+```
+
+Ready to use right away — you never touch the command line again. Full commands and configuration are in section 4, "Usage".
 
 ---
 
@@ -473,6 +488,10 @@ The task registered by `install` uses `LogonType = Interactive`, so it won't fir
 This tool performs DNS preference selection and connectivity probing only. It does **not** provide, include, or assist with any proxy, tunnel, traffic forwarding, or network-control evasion capability. You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
 
 ---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

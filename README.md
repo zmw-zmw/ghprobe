@@ -1,5 +1,10 @@
 # ghprobe
 
+[![ci](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
+[![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)](README.md#系统要求与常见问题)
+
 [English](README.en.md) | 简体中文
 
 **为 GitHub 直连加速的 Windows 命令行工具：在你自己的网络里测出「当前真正能用的 IP」，写进 hosts，并在 IP 失效时自动换掉。不装代理、不改系统代理、不劫持流量。**
@@ -10,6 +15,16 @@
 - 只改 **hosts 文件**，不安装任何代理 / 驱动 / 服务
 - 运行需要 **Node.js ≥ 18**
 - 许可证 **GPL-3.0-only**，作者 **zmw**，仓库 <https://github.com/zmw-zmw/ghprobe>
+
+## 快速开始
+
+```bash
+npm install -g ghprobe
+ghprobe install     # 探测一次 + 写入 hosts + 注册每分钟健康检查（全程只弹一次 UAC）
+ghprobe uninstall   # 停止：删除计划任务并还原 hosts
+```
+
+装完即用，之后不用再敲命令。完整命令与配置说明见第 4 节「如何使用」。
 
 ---
 
@@ -466,6 +481,10 @@ Windows 对同一域名在 hosts 里只认第一条，写多条也不会轮询�
 本工具仅做 DNS 优选与连通性探测，**不提供、不包含、不协助**任何代理、隧道、流量转发或网络管控对抗能力。使用本工具产生的一切后果由使用者自行承担。请遵守你所在地区的法律法规。
 
 ---
+
+## 更新日志
+
+变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## License
 

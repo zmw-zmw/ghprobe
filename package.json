@@ -2,6 +2,28 @@
   "name": "ghprobe",
   "version": "0.1.0",
   "description": "GitHub direct-connect optimizer: local DoH resolution + TLS-verified probing + hosts generation (no proxy)",
+  "keywords": [
+    "github",
+    "hosts",
+    "hosts-file",
+    "dns",
+    "dns-over-https",
+    "doh",
+    "sni",
+    "acceleration",
+    "network",
+    "windows",
+    "cli"
+  ],
+  "homepage": "https://github.com/zmw-zmw/ghprobe#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zmw-zmw/ghprobe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zmw-zmw/ghprobe/issues"
+  },
+  "author": "zmw",
   "type": "module",
   "bin": { "ghprobe": "bin/ghprobe.js" },
   "main": "bin/ghprobe.js",
