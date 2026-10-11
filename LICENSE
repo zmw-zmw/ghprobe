@@ -1,25 +1,6 @@
-ghprobe
+ghprobe - GitHub direct-connect optimizer
 Copyright (C) 2026 zmw
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, version 3 of the License.
-
-Version 3 only: the "or any later version" option is intentionally not granted.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-Source repository: https://github.com/zmw-zmw/ghprobe
-
-===============================================================================
-                GNU General Public License, Version 3, 29 June 2007
-===============================================================================
+SPDX-License-Identifier: GPL-3.0-only
 
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
