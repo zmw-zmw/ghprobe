@@ -9,6 +9,13 @@
 
 ### Changed
 
+- **`LICENSE` 与官方 GPLv3 原文完全同构**（`gnu.org/licenses/gpl-3.0.txt` 逐行一致，仅末尾
+  How to Apply 模板按规范填写）：原先前置了 23 行自定义声明 + 装饰性 `===` 横幅，导致 GitHub 的
+  licensee 检测判为 **`Other` / `NOASSERTION`** —— 表现为没有许可证徽标、API 的 `license`
+  字段为空、自动化合规工具认不出。**正文之前不能有任何自有文字**（先收敛到 3 行仍失败，
+  整体移除后才识别为 `GPL-3.0`）；版权与 GPL-3.0-only 版本锁定声明改为放在
+  `package.json` 的 `license` 字段、各源文件 SPDX 头、README「License」段，以及 LICENSE
+  末尾的 How to Apply 模板里
 - **许可证收敛为 `GPL-3.0-only`**（原 `GPL-3.0-or-later`）：刻意不接受「或任何更高版本」，
   避免他人在版本解释上做文章。`LICENSE` 重写为纯英文官方 GPLv3 正文，附录模板填入真实
   程序名/年份/作者/仓库地址（`https://github.com/zmw-zmw/ghprobe`）
