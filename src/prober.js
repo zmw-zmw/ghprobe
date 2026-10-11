@@ -70,17 +70,21 @@ function badRedirect(statusCode, location, sig) {
   return !new Set(hosts).has(h);
 }
 
-// 一条 TLS 连接同时量出 TCP 与 TLS 两段耗时
-function tcpTlsProbe(ip, domain, tlsMs) {
+// 一条 TLS 连接同时量出 TCP 与 TLS 两段耗时。
+// 🔴 两段必须用**各自的超时**：黑洞 IP 的 TCP 握手会一直挂到超时，若统一用 tlsMs(6s)，
+//    十几条死候选就是几十秒 —— 池子因此不敢放宽，进而出现「明明有活 IP 却报 stuck」。
+//    这里先按 tcpMs 计，握手成功（connect 事件）后再把超时切到 tlsMs：
+//    快速淘汰死 IP，同时不误杀「连得上但 TLS 慢」的活 IP。
+function tcpTlsProbe(ip, domain, tcpMs, tlsMs) {
   return new Promise((resolve) => {
     const t0 = Date.now();
-    let tcpMs = -1;
+    let tcpCost = -1;
     let stage = "tcp";
     const sock = tls.connect({ host: ip, port: 443, servername: domain, rejectUnauthorized: true });
     const done = (r) => { try { sock.destroy(); } catch { /* 已销毁 */ } resolve(r); };
-    sock.setTimeout(tlsMs, () => done({ ok: false, stage, err: "timeout" }));
-    sock.on("connect", () => { tcpMs = Date.now() - t0; stage = "tls"; });
-    sock.on("secureConnect", () => done({ ok: true, tcpMs, tlsMs: Date.now() - t0 }));
+    sock.setTimeout(tcpMs, () => done({ ok: false, stage, err: "timeout" }));
+    sock.on("connect", () => { tcpCost = Date.now() - t0; stage = "tls"; sock.setTimeout(tlsMs); });
+    sock.on("secureConnect", () => done({ ok: true, tcpMs: tcpCost, tlsMs: Date.now() - t0 }));
     sock.on("error", (e) => done({ ok: false, stage, err: String(e.code || e.message).slice(0, 60) }));
   });
 }
@@ -145,7 +149,8 @@ function httpProbe(ip, domain, httpMs) {
 // 探测单个 (域名, IP)：三关全过才算活；分数越小越优
 export async function probeIp(domain, ip, cfg) {
   const { tlsMs, httpMs } = cfg.timeouts;
-  const g = await tcpTlsProbe(ip, domain, tlsMs);
+  const tcpMs = cfg.timeouts.tcpMs ?? tlsMs; // 老配置没这一项时退回 tlsMs，行为不变
+  const g = await tcpTlsProbe(ip, domain, tcpMs, tlsMs);
   if (!g.ok) { return { domain, ip, ok: false, stage: g.stage, err: g.err }; }
   const h = await httpProbe(ip, domain, httpMs);
   const tlsCost = g.tlsMs - g.tcpMs;

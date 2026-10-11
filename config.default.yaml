@@ -15,18 +15,67 @@ doh:
   - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
   - { name: dnspod, host: 1.12.12.12, sni: doh.pub, path: /dns-query }
 
-# 内置候选 IP 池：与域名无关地全量进候选，由 TLS 证书终审 + 应用层终审共同判定归属
-# fastly 段服务 githubusercontent 系，azure 段服务 github.com 系
+# 内置候选 IP 池：补足 DoH 拿不到的候选。
+# 🔴 池子必须够宽，否则会出现「明明有活 IP，工具却报 stuck」——见下面 azure 段的说明。
 ipPools:
+  # Fastly 段：服务 githubusercontent 系（raw / objects / gist / avatars）
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
-  azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
+  # GitHub 自租段：服务 github.com / codeload.github.com 主站。
+  # 来源：GitHub 官方 api.github.com/meta 的 `web` 段（/32 单播）+ 140.82.112.0/20。
+  # 🔴 2026-10 实测：这些 IP **在分钟级抖动** —— 同一批 IP 几分钟前全灭、现在 9/20 可用，
+  #    且「活的是哪几个」每次都不一样。所以池子必须宽（靠 tcpMs 短超时兜住成本），
+  #    只留少量 IP 必然出现「明明有活 IP 却报 stuck」。
+  azure:
+    # Azure 段（亚太/欧洲）
+    - 20.200.245.247
+    - 20.201.28.151
+    - 20.207.73.82
+    - 20.217.135.5
+    - 20.233.83.145
+    - 20.248.137.48
+    - 20.26.156.215
+    - 20.29.134.23
+    - 20.87.245.0
+    - 20.205.243.166
+    - 20.205.243.167
+    - 20.205.243.168
+    - 4.237.22.34
+    - 20.27.177.113
+    - 4.208.26.197
+    # 140.82.112.0/20（美国，web/api 走 .3 / .4）
+    - 140.82.112.3
+    - 140.82.112.4
+    - 140.82.113.3
+    - 140.82.113.4
+    - 140.82.114.3
+    - 140.82.114.4
+    - 140.82.116.3
+    - 140.82.116.4
+    - 140.82.121.3
+
+# 域名 -> 只探哪些池（不配 = 用全部池）。
+# 两个池互不相干：185.199.x.x 永远不给 github.com 服务，20.x 也不给 raw.githubusercontent.com
+# 服务。分开能省掉近一半候选（冷启动最明显）。池名写错时自动退回「用全部池」。
+domainPools:
+  github.com: [azure]
+  codeload.github.com: [azure]
+  objects.githubusercontent.com: [fastly]
+  raw.githubusercontent.com: [fastly]
+  gist.githubusercontent.com: [fastly]
+  avatars.githubusercontent.com: [fastly]
 
 # 被主机名黑名单掐掉的域名走兜底链：主候选全灭时改探测这些替身域名并写入
 fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
-timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
-probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
+# 超时：tcpMs 只管 TCP 握手阶段（死 IP 快速淘汰），握手成功后自动切到 tlsMs。
+# 黑洞 IP 会一直挂到超时，所以这两段必须分开 —— 否则每加一个候选都要多等 tlsMs。
+timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
+probe:
+  maxCandidates: 8   # DoH 每域名最多取几个候选
+  maxPoolIps: 24     # 内置池每域名最多补几个。**与 DoH 各自限额，不共享总上限**（见 probe.js）
+  maxPerDomain: 4    # 每域名最多保留几个可用 IP（写 hosts 只取第 1 个）
+  concurrency: 10    # 全局同时握手的 socket 上限（跨域名共享）
 serve: { host: 127.0.0.1, port: 8930 }
 # 调度：固定频率健康检查，不做指数退避（哨兵一轮 <2s，退避省不下开销反而拉长最坏发现延迟）
 schedule:

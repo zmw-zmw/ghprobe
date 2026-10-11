@@ -58,11 +58,11 @@ doh:
 
 GitHub 连不上，原因不在同一层，能修的手段也不同：
 
-| 故障层 | 现象 | 能否靠「换 IP」修好 |
-| --- | --- | --- |
-| **DNS 污染** | 解析到错误 / 不可达 IP | ✅ 能。换一个正确 IP 即可 |
+| 故障层            | 现象                              | 能否靠「换 IP」修好                 |
+| -------------- | ------------------------------- | --------------------------- |
+| **DNS 污染**     | 解析到错误 / 不可达 IP                  | ✅ 能。换一个正确 IP 即可             |
 | **SNI 主机名黑名单** | 主机名本身被封锁，TLS 握手里的 SNI 就带着被封锁的域名 | ❌ 不能。换任何 IP 都没用，只能**换域名**兜底 |
-| **IP 黑洞** | 某些 IP 段被整段丢弃 | ✅ 能。换到可用段即可 |
+| **IP 黑洞**      | 某些 IP 段被整段丢弃                    | ✅ 能。换到可用段即可                 |
 
 很多工具/教程只处理第一层，遇到第二层（如 `raw.githubusercontent.com` 被精确 RST）就束手无策。ghprobe 对第二层有专门的**兜底链**机制（见第 5 节），把「换 IP 修不了」的情况单独处理。
 
@@ -200,7 +200,6 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 2. 弹出**一次 UAC**，在同一个管理员会话里完成两件事：
    - **写一次 hosts**：先把当前 hosts 备份为 `hosts.ghprobe-bak`，写入 ghprobe 块，校验块标记存在，失败自动回滚，成功则刷新 DNS 缓存。
    - **注册名为 `ghprobe` 的 Windows 计划任务**：以**最高权限（RunLevel=Highest）静默运行**（后续写入不再弹 UAC），按 `schedule.healthMin`（默认 1 分钟）的间隔执行 `health --apply`。任务动作经一个隐藏窗口包装器启动，**无窗口**，不打扰你。
-
    装完即用，此后不用再敲命令。
 
 **`ghprobe uninstall` 做了什么：**
@@ -235,7 +234,7 @@ cd ghprobe
 .\install.ps1 -Uninstall      # 卸载：删除计划任务 + 还原 hosts
 ```
 
-> `install.ps1` 还支持 `-LogFile <path>` 指定部署日志路径（默认 `%TEMP%\ghprobe-deploy.log`）；`-Inner` 是脚本内部自提权用的，不用手动传。
+> `install.ps1` 还支持 `-LogFile <path>` 指定部署日志路径（默认 `%TEMP%\ghprobe-deploy.log`）；`-Inner` 是脚本内部自提权用的，不用手动传。  
 > `install.cmd` 只是 `install.ps1` 的 cmd 包装（等价，双击即用）。
 
 ### 其它命令
@@ -318,6 +317,7 @@ schedule:
   absentCooldownHours: 1  # 缺失域名冷却（小时）：SNI 层封锁的域名全量也救不回，冷却内不重试
 ```
 
+
 ### 卸载 / 回滚与日志
 
 ```bash
@@ -334,34 +334,48 @@ ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自�
 
 ## 5. 关于「为什么还会出现 cdn.jsdelivr.net」
 
-**`cdn.jsdelivr.net` 不是国内镜像**，它是 jsDelivr 的公共 CDN（走 Cloudflare）。它进 hosts 的唯一原因是**兜底链**。
+有用户问：**「我这个是专门为 GitHub 加速的，其它国内镜像为什么要加速？」**
 
-有一种故障是 **SNI 主机名黑名单** —— 被封锁的是主机名本身，TLS 握手里的 SNI 带着那个域名，**换任何 IP 都没用**，只能**换域名**。jsDelivr 提供 GitHub 文件的直接映射：
+先把措辞说准：**`cdn.jsdelivr.net` 不是「国内镜像」**。它是 jsDelivr 的 CDN（走 Cloudflare），是一个全球性的公共 CDN，跟「国内镜像站」是两回事。
+
+它为什么会出现在 hosts 里？**唯一原因是兜底链**。
+
+回顾第 1 节的故障分层：有一种故障叫 **SNI 主机名黑名单** —— 被封锁的是**主机名本身**。这时 TLS 握手里的 SNI 就带着那个被封锁的域名，**换任何 IP 都没用**：你换到天涯海角的 IP，握手时客户端照样要说出被封锁的域名，一样被掐断。这种情况下，唯一的出路是**换域名**去取同一份内容。
+
+jsDelivr 提供了一个直接把 GitHub 仓库文件映射出来的路径：
 
 ```text
-raw.githubusercontent.com/<user>/<repo>/<ref>/<path>
-cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>     ← 同一份内容
+https://cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>
 ```
 
-所以当 `raw.githubusercontent.com` 被 SNI 封锁、主候选全灭时，ghprobe 用它兜底。
+也就是说，`raw.githubusercontent.com/<user>/<repo>/<ref>/<path>` 上的那份文件内容，可以从 `cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>` 拿到 —— 这是「同一份内容的另一个可访问入口」。所以当 `raw.githubusercontent.com` 被 SNI 层封锁、主候选全灭时，ghprobe 会用 jsDelivr 作为**兜底入口**，保证这类文件至少有一条路可走。
 
-前提：
+**几个必须说清楚的前提：**
 
-- 默认只有 `raw.githubusercontent.com` 配了兜底；`github.com` / `codeload.github.com` 从不走兜底。
-- 只在主候选**全灭**时触发，有任一活 IP 就不探兜底。
-- 命中后写入的是 `cdn.jsdelivr.net` 的 IP —— 救的是「换域名」，不是「换 IP」。
+- **默认配置里只有 `raw.githubusercontent.com` 配了这条兜底**：
+  ```yaml
+  fallbacks:
+    raw.githubusercontent.com: [cdn.jsdelivr.net]
+  ```
+- **主域名 `github.com` / `codeload.github.com` 从不走兜底**。它们只在官方域名族里选 IP。
+- **兜底只在主候选「全灭」时才触发**。主域名只要有任何一条活 IP，就不会去探兜底域名。
+- 兜底命中后，写入的是**兜底域名的 IP**（即 `cdn.jsdelivr.net` 的 IP），不是 `raw.githubusercontent.com` 的 —— 因为这时候要救的是「换域名」而不是「换 IP」。
 
-不想要就清空 `fallbacks`（`--config` 覆盖是递归合并，给空对象即可）：
+**如果你不想要这个兜底**，完全可以去掉：
 
-```yaml
-fallbacks: {}
-```
+- 编辑 `config.default.yaml`，把 `fallbacks` 段清空：
+  ```yaml
+  fallbacks: {}
+  ```
+- 或者用自己的 `--config` 覆盖（对象是递归合并的，`fallbacks` 直接给空对象即可）：
+  ```yaml
+  fallbacks: {}
+  ```
+  ```bash
+  ghprobe install -c my.yaml
+  ```
 
-```bash
-ghprobe install -c my.yaml
-```
-
-代价：`raw.githubusercontent.com` 被 SNI 封锁后，这类文件没有替代入口。
+去掉之后，工具就**完全只用 GitHub 官方域名**。代价是：一旦 `raw.githubusercontent.com` 被 SNI 层封锁，这一类文件将没有任何替代入口（这属于该网络环境的客观限制，不是工具能绕过的）。
 
 ---
 
@@ -369,29 +383,29 @@ ghprobe install -c my.yaml
 
 ### 系统要求
 
-- **操作系统：Windows**。写系统 hosts、UAC 提权、注册计划任务都是 Windows 专有能力。
+- **操作系统：Windows**。写系统 hosts、UAC 提权、注册计划任务都是 Windows 专有能力。  
   （探测 / 排名 / DoH / HTTP API 等核心逻辑本身跨平台，CI 也在 ubuntu 上跑这部分；但在 Linux/macOS 上跑 `probe` 只能看结果，**不会也无法**写系统 hosts。）
 - **Node.js ≥ 18**。
 - 首次安装需要管理员权限（一次 UAC）。
 
 ### 常见问题
 
-**Q：为什么需要管理员权限？**
+**Q：为什么需要管理员权限？**  
 系统 hosts 文件（`C:\Windows\System32\drivers\etc\hosts`）只有管理员能写；注册以最高权限运行的计划任务也需要管理员。`ghprobe install` 把「写 hosts」和「注册任务」合并进**同一次 UAC**，所以全程只弹一次。
 
-**Q：为什么有时候修不好？**
+**Q：为什么有时候修不好？**  
 工具只能找到**当前网络、当前时刻**可用的 IP。如果遇到的是 SNI 主机名黑名单（换 IP 修不了）或 IP 黑洞，可能所有候选都不可用。此时会命中兜底链（如果配了），或者触发全灭护栏 —— **保留旧 IP、不写空块**，绝不会硬塞一个错误 IP 进去。
 
-**Q：会不会影响别的软件？**
+**Q：会不会影响别的软件？**  
 不会。它**只写 hosts 文件**，不装代理、不改系统代理设置、不劫持流量。而且只操作 `# === ghprobe begin/end ===` 之间属于它自己的那一块，**你原有的 hosts 条目和第三方工具写的条目都不会被改动**；卸载时也只剥掉自己的块。
 
-**Q：为什么每个域名只写一条 IP？**
+**Q：为什么每个域名只写一条 IP？**  
 Windows 对同一域名在 hosts 里只认第一条，写多条也不会轮询。所以 ghprobe 每个域名只写最优的一条；排名里的「备选」仅用于展示，不写入。
 
-**Q：两次健康检查之间 IP 失效了怎么办？**
+**Q：两次健康检查之间 IP 失效了怎么办？**  
 每域名只写一条 IP，若它在两次检查之间失效，最坏中断时长 ≈ `schedule.healthMin`（默认 1 分钟）。这是 hosts 机制本身的限制，不是探测能规避的。
 
-**Q：计划任务锁屏时会跑吗？**
+**Q：计划任务锁屏时会跑吗？**  
 `install` 注册的任务 `LogonType` 为 `Interactive`，锁屏 / 注销 / 未登录状态下不会触发，登录后按间隔继续。
 
 ### 免责声明
