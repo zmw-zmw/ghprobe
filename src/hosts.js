@@ -52,14 +52,21 @@ export function releaseHostsLock(fd) {
   try { fs.unlinkSync(HOSTS_LOCK); } catch { /* 忽略 */ }
 }
 
-// 从 ranked(域名->有序IP列表) 生成 hosts 块；Windows 同一域名只取第一条生效，故每域名仅写最优 1 条
-export function buildBlock(ranked, extraDomains) {
+// 从 ranked(域名->有序IP列表) 生成 hosts 块。
+// 🔴 每域名写 maxPer 条（默认 2）：**Windows 会把同名多条全部返回**（2026-10-11 实测，
+//    dns.lookup/all 与 curl 双证），且 curl / 浏览器会**逐个尝试** —— 黑洞 IP 排在前也能
+//    fallback 到后面的活 IP（实测 http=200 / 0.22s）。旧注释「只取第一条生效」是错的。
+//    所以多写 1 条备选 = 抖动时客户端自动兜底，不必干等下一轮健康检查（最长 1 分钟）。
+export function buildBlock(ranked, extraDomains, maxPer = 2) {
   const lines = [BEGIN, `# generated ${new Date().toISOString()} by ghprobe`];
+  const put = (domain, rs) => {
+    for (const r of (rs || []).slice(0, Math.max(1, maxPer))) { lines.push(`${r.ip} ${domain}`); }
+  };
   for (const [domain, rs] of ranked) {
-    if (rs.length) { lines.push(`${rs[0].ip} ${domain}`); }
+    if (rs.length) { put(domain, rs); }
   }
   for (const [domain, rs] of extraDomains || []) {
-    if (rs.length) { lines.push(`${rs[0].ip} ${domain}`); }
+    if (rs.length) { put(domain, rs); }
   }
   lines.push(END);
   return lines.join("\n");

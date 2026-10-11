@@ -20,6 +20,17 @@ test("buildBlock: 含 begin/end 标记与条目", () => {
   assert.ok(block.includes("104.16.0.1 cdn.jsdelivr.net"));
 });
 
+// Windows hosts 同名多条会被全部返回、客户端逐个尝试（2026-10-11 实测）→ 默认写 2 条
+test("buildBlock: 默认每域名写 2 条（主 IP + 备选），顺序按 rank 结果", () => {
+  const ghLines = buildBlock(ranked, extra).split("\n").filter((l) => l.endsWith(" github.com"));
+  assert.deepEqual(ghLines, ["20.205.243.166 github.com", "20.27.177.113 github.com"]);
+});
+
+test("buildBlock: maxPer=1 退回单条（旧行为）", () => {
+  const ghLines = buildBlock(ranked, extra, 1).split("\n").filter((l) => l.endsWith(" github.com"));
+  assert.deepEqual(ghLines, ["20.205.243.166 github.com"]);
+});
+
 test("mergeHosts: 替换旧块且保留其他行", () => {
   const current = ["# 本机原有条目", "127.0.0.1 localhost", "# === ghprobe begin ===", "9.9.9.9 old.com", "# === ghprobe end ===", "# 尾注"].join("\n");
   const merged = mergeHosts(current, buildBlock(ranked, extra));

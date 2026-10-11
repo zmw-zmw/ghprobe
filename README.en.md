@@ -127,7 +127,7 @@ IPs usually die while you are not looking. With no automatic check, you only fin
                           └────────────────┬────────────────┘
                                            │
                           ┌────────────────▼────────────────┐
-                          │  build hosts block (1 entry/dom.)│
+                          │  build hosts block (best + spare)│
                           └────────────────┬────────────────┘
                                            │
                           ┌────────────────▼────────────────┐
@@ -161,6 +161,7 @@ The sentinel interval comes from `schedule.healthMin`, default **1 minute** (als
 - **All-fail predicate (only a total outage counts as network failure)**: the network is judged to be at fault (blackhole window) only when **all written IPs fail** and there are ≥ 2 entries; then nothing is written that round. As long as **any single entry is healthy**, the path is up, so the failing ones are just stale/dead IPs and a re-rank is triggered. (The earlier "majority failed → give up" predicate was proven to misfire: its denominator counted only written entries and was often as low as 3–4, so "3 stale + 1 healthy" was misjudged as an outage — not fixing when it should.)
 - **All-dead guard**: before writing, if the new block has **no valid IP at all** while hosts still has old entries, the write is **refused and the old entries are kept**. This prevents a network blip of a few tens of seconds from wiping mappings that were working. `probe --apply` and `health --apply` share this guard.
 - **Partial update + IP stickiness**: after a full re-rank, only domains that **actually differ** from the current hosts are updated; tiny score jitter on a healthy domain won't trigger an IP change (each change costs a DNS cache flush and invalidates connection pools).
+- **Duplicate-entry fallback**: each domain gets its best IP **plus one spare** by default. Windows returns *all* same-name entries and clients try them one by one, so if the first IP happens to die mid-jitter, the browser / `git` automatically falls through to the spare — turning a "down for up to a minute" into "one extra connect timeout". Count is controlled by `hosts.maxEntriesPerDomain` (default 2; set 1 for the old single-entry behavior).
 - **`# absent` cooldown**: domains present in config but absent from hosts (typically SNI-blocked domains that even a full run can't save) are recorded as a `# absent <domain> <timestamp>` comment inside the hosts block, and are not retried for `schedule.absentCooldownHours` (default 1 hour), so the heavy tier doesn't fire uselessly every minute.
 - **Stateless**: the `# absent` cooldown table is encoded directly in the hosts block comments — it survives process restarts and cross-process runs with no extra state file.
 - **Cross-process write lock**: `probe --apply` and the scheduled task may write hosts concurrently, so a lock file serializes them and avoids read-modify-write clobbering; if the lock can't be acquired the round is skipped and the next health check writes it.
@@ -171,13 +172,17 @@ The sentinel interval comes from `schedule.healthMin`, default **1 minute** (als
 # === ghprobe begin ===
 # generated 2026-10-11T00:00:00.000Z by ghprobe
 140.82.112.3 github.com
+20.27.177.113 github.com
 20.27.177.113 codeload.github.com
 185.199.108.133 raw.githubusercontent.com
+185.199.111.133 raw.githubusercontent.com
 # absent gist.githubusercontent.com 2026-10-11T00:00:00.000Z
 # === ghprobe end ===
 ```
 
-Everything between `# === ghprobe begin/end ===` is owned by ghprobe; repeated writes only replace what's inside the block. **Lines outside the block (your own hosts entries and anything a third-party tool wrote) are never touched.** Windows only honors the first entry per domain, so exactly one best entry is written per domain.
+Everything between `# === ghprobe begin/end ===` is owned by ghprobe; repeated writes only replace what's inside the block. **Lines outside the block (your own hosts entries and anything a third-party tool wrote) are never touched.**
+
+A domain may appear on several lines (2 by default): **the first line is the current best IP, the rest are spares**. Windows returns all same-name entries and curl / browsers try them one by one — so if the first IP happens to be dead, the client falls through to a spare instead of waiting for the next health check. Controlled by `hosts.maxEntriesPerDomain`.
 
 ---
 
@@ -389,11 +394,11 @@ The tool can only find IPs usable **on your current network at the current momen
 **Q: Will it affect other software?**
 No. It **only writes the hosts file** — no proxy, no system-proxy changes, no traffic hijacking. It operates only on the block between `# === ghprobe begin/end ===` that belongs to it, so **your existing hosts entries and third-party entries are never modified**; uninstall likewise strips only its own block.
 
-**Q: Why only one IP per domain?**
-Windows honors only the first entry per domain in hosts, and multiple entries won't round-robin. So ghprobe writes exactly one best entry per domain; the "alternatives" in the ranking are for display only.
+**Q: How many IPs per domain?**
+Two by default (`hosts.maxEntriesPerDomain`): the best IP plus one spare. Windows returns all same-name entries and clients try them in order, so the spare is a **real fallback** — if the first IP is dead, the client retries the second instead of failing outright. Set it to 1 for the old single-entry behavior.
 
 **Q: What if an IP dies between two health checks?**
-Only one IP is written per domain; if it dies between checks, the worst-case interruption is about `schedule.healthMin` (1 minute by default). This is a limitation of the hosts mechanism itself, not something probing can avoid.
+The client falls through to the spare entry, so the cost is one extra connect timeout rather than a hard failure. Without a spare, the worst-case interruption would be about `schedule.healthMin` (1 minute by default).
 
 **Q: Does the scheduled task run while the screen is locked?**
 The task registered by `install` uses `LogonType = Interactive`, so it won't fire while locked / logged off / not logged in; it resumes on the interval after logon.

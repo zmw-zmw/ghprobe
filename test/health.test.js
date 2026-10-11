@@ -276,3 +276,81 @@ test("shouldKeepOldBlock: 新块有活 IP -> 允许写入", () => {
   const newBlock = buildHealthBlock(new Map([["github.com", "2.2.2.2"]]), new Map());
   assert.equal(shouldKeepOldBlock(oldContent, newBlock), false);
 });
+
+// ── 同名多条目（客户端 fallback）────────────────────────────────────
+// 2026-10-11 实测：Windows hosts 同名多条会被解析器**全部返回**（保持顺序），
+// curl / 浏览器会逐个尝试 → 首条抖动失效时可自动 fallback。以下用例锁住这个行为。
+test("parseBlock: 同名多条 -> 第一条为主 IP，其余按顺序进 extras", () => {
+  const content = [
+    "# === ghprobe begin ===",
+    "20.205.243.166 github.com",
+    "20.200.245.247 github.com",
+    "140.82.116.3 github.com",
+    "# === ghprobe end ===",
+  ].join("\n");
+  const p = parseBlock(content);
+  assert.equal(p.entries.get("github.com"), "20.205.243.166");
+  assert.deepEqual(p.extras.get("github.com"), ["20.200.245.247", "140.82.116.3"]);
+});
+
+test("parseBlock: 重复 IP 不重复计入 extras", () => {
+  const content = "# === ghprobe begin ===\n1.1.1.1 a.com\n1.1.1.1 a.com\n2.2.2.2 a.com\n# === ghprobe end ===";
+  const p = parseBlock(content);
+  assert.equal(p.entries.get("a.com"), "1.1.1.1");
+  assert.deepEqual(p.extras.get("a.com"), ["2.2.2.2"]);
+});
+
+test("buildHealthBlock: 同名多条（含 extras）无损往返", () => {
+  const entries = new Map([["github.com", "20.205.243.166"]]);
+  const extras = new Map([["github.com", ["20.200.245.247"]]]);
+  const p = parseBlock(buildHealthBlock(entries, new Map(), extras));
+  assert.equal(p.entries.get("github.com"), "20.205.243.166");
+  assert.deepEqual(p.extras.get("github.com"), ["20.200.245.247"]);
+});
+
+test("buildHealthBlock: 备选与主 IP 相同则不重复写行", () => {
+  const entries = new Map([["github.com", "1.1.1.1"]]);
+  const extras = new Map([["github.com", ["1.1.1.1"]]]);
+  const lines = buildHealthBlock(entries, new Map(), extras).split("\n").filter((l) => l.endsWith(" github.com"));
+  assert.equal(lines.length, 1);
+});
+
+test("applyDelta: 每域名写 maxEntriesPerDomain 条（主 IP + 备选）", () => {
+  const multiCfg = { domains: ["github.com"], schedule: { absentCooldownHours: 1 }, hosts: { maxEntriesPerDomain: 2 } };
+  const current = { entries: new Map([["github.com", "1.1.1.1"]]), extras: new Map(), absent: new Map() };
+  const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }, { ip: "2.2.2.2" }, { ip: "3.3.3.3" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["github.com"], multiCfg);
+  assert.equal(d.entries.get("github.com"), "1.1.1.1");
+  assert.deepEqual(d.extras.get("github.com"), ["2.2.2.2"], "maxPer=2 -> 主 IP + 1 个备选");
+});
+
+test("applyDelta: maxEntriesPerDomain=1 -> 退回单条（无 extras）", () => {
+  const oneCfg = { domains: ["github.com"], schedule: { absentCooldownHours: 1 }, hosts: { maxEntriesPerDomain: 1 } };
+  const current = { entries: new Map([["github.com", "1.1.1.1"]]), extras: new Map(), absent: new Map() };
+  const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }, { ip: "2.2.2.2" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["github.com"], oneCfg);
+  assert.equal(d.extras.has("github.com"), false);
+});
+
+test("applyDelta: orphan 域名的主 IP 与备选一起清掉", () => {
+  const cfg2 = { domains: ["github.com"], schedule: { absentCooldownHours: 1 }, hosts: { maxEntriesPerDomain: 2 } };
+  const current = {
+    entries: new Map([["old.example.com", "1.1.1.1"]]),
+    extras: new Map([["old.example.com", ["2.2.2.2"]]]),
+    absent: new Map(),
+  };
+  const d = applyDelta(current, new Map(), new Map(), ["old.example.com"], cfg2);
+  assert.equal(d.entries.has("old.example.com"), false);
+  assert.equal(d.extras.has("old.example.com"), false, "orphan 的备选也要清，否则会留孤儿行");
+});
+
+test("blockFromProbeResult: 每域名写多条（主 IP + 备选）", () => {
+  const multiCfg = { domains: ["github.com"], fallbacks: {}, schedule: { absentCooldownHours: 1 }, hosts: { maxEntriesPerDomain: 2 } };
+  const block = blockFromProbeResult(multiCfg, {
+    ranked: new Map([["github.com", [{ ip: "20.205.243.166" }, { ip: "20.200.245.247" }]]]),
+    extra: new Map(),
+  });
+  const p = parseBlock(block);
+  assert.equal(p.entries.get("github.com"), "20.205.243.166");
+  assert.deepEqual(p.extras.get("github.com"), ["20.200.245.247"]);
+});

@@ -74,8 +74,16 @@ timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
 probe:
   maxCandidates: 8   # DoH 每域名最多取几个候选
   maxPoolIps: 24     # 内置池每域名最多补几个。**与 DoH 各自限额，不共享总上限**（见 probe.js）
-  maxPerDomain: 4    # 每域名最多保留几个可用 IP（写 hosts 只取第 1 个）
+  maxPerDomain: 4    # 每域名最多保留几个可用 IP（前 maxEntriesPerDomain 个会写进 hosts）
   concurrency: 10    # 全局同时握手的 socket 上限（跨域名共享）
+# hosts 写入：每域名写几条候选。
+# 🔴 2026-10-11 实测推翻旧假设「Windows 同一域名只取第一条」—— hosts 里同名多条会被
+#    解析器**全部返回**（保持文件顺序），且 curl / 浏览器会**逐个尝试**：黑洞 IP 排在前
+#    也能 fallback 到后面的活 IP（实测 http=200 / 0.22s）。所以多写 1 条备选 = 抖动时
+#    客户端自动兜底，把「断最长 1 分钟」变成「多等一个连接超时」。
+#    不要贪多：每多一个死 IP 就多叠一个连接超时；2 条是收益/代价的平衡点。1 = 退回旧行为。
+hosts:
+  maxEntriesPerDomain: 2
 serve: { host: 127.0.0.1, port: 8930 }
 # 调度：固定频率健康检查，不做指数退避（哨兵一轮 <2s，退避省不下开销反而拉长最坏发现延迟）
 schedule:

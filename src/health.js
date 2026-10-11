@@ -10,10 +10,12 @@ import { applyHosts, mergeHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock }
 const BEGIN = "# === ghprobe begin ===";
 const END = "# === ghprobe end ===";
 
-// 从 hosts 内容解析 ghprobe 块：有效 IP 映射、缺失域名冷却表
-// 块内行格式：`IP 域名` 或 `# absent 域名 时间戳`
+// 从 hosts 内容解析 ghprobe 块：有效 IP 映射、同名备选 IP、缺失域名冷却表
+// 块内行格式：`IP 域名`（同域名可多行：第一条 = 主 IP，其余 = 备选）或 `# absent 域名 时间戳`
+// 主 IP 进 entries（决策/探活只看它），备选进 extras（原样写回，供客户端 fallback）
 export function parseBlock(content) {
   const entries = new Map();
+  const extras = new Map();
   const absent = new Map();
   let inBlock = false;
   for (const raw of String(content || "").split(/\r?\n/)) {
@@ -28,16 +30,27 @@ export function parseBlock(content) {
     }
     const parts = line.split(/\s+/);
     if (parts.length >= 2 && parts[0] && parts[1]) {
-      entries.set(parts[1].toLowerCase(), parts[0]);
+      const domain = parts[1].toLowerCase();
+      const ip = parts[0];
+      if (!entries.has(domain)) { entries.set(domain, ip); continue; }
+      if (entries.get(domain) === ip) { continue; }
+      const list = extras.get(domain) || [];
+      if (!list.includes(ip)) { list.push(ip); extras.set(domain, list); }
     }
   }
-  return { entries, absent };
+  return { entries, extras, absent };
 }
 
-// 生成健康检查用的 hosts 块：有效条目 + 缺失域名冷却注释
-export function buildHealthBlock(entries, absent) {
+// 生成健康检查用的 hosts 块：有效条目（每域名 主 IP + 备选）+ 缺失域名冷却注释
+// extras：domain -> [备选 IP...]。同域名多行让客户端在首个 IP 抖动时可自动 fallback。
+export function buildHealthBlock(entries, absent, extras = new Map()) {
   const lines = [BEGIN, `# generated ${new Date().toISOString()} by ghprobe`];
-  for (const [domain, ip] of entries) { lines.push(`${ip} ${domain}`); }
+  for (const [domain, ip] of entries) {
+    lines.push(`${ip} ${domain}`);
+    for (const alt of extras.get(domain) || []) {
+      if (alt && alt !== ip) { lines.push(`${alt} ${domain}`); }
+    }
+  }
   for (const [domain, ts] of absent) { lines.push(`# absent ${domain} ${ts}`); }
   lines.push(END);
   return lines.join("\n");
@@ -53,13 +66,21 @@ export function targetDomains(cfg) {
 // 与 health 写出的块保持同构：没有活 IP 的目标域名记入 `# absent` 冷却注释，
 // 否则下次 health 会把这些域名当「缺失」而白跑一次全量。
 export function blockFromProbeResult(cfg, r) {
+  const maxPer = Math.max(1, cfg.hosts?.maxEntriesPerDomain ?? 2);
   const entries = new Map();
-  for (const [d, rs] of r.ranked || []) { if (rs.length) { entries.set(d, rs[0].ip); } }
-  for (const [d, rs] of r.extra || []) { if (rs.length) { entries.set(d, rs[0].ip); } }
+  const extras = new Map();
+  const put = (d, list) => {
+    if (!list || !list.length) { return; }
+    entries.set(d, list[0].ip);
+    const alt = list.slice(1, maxPer).map((x) => x.ip);
+    if (alt.length) { extras.set(d, alt); }
+  };
+  for (const [d, rs] of r.ranked || []) { put(d, rs); }
+  for (const [d, rs] of r.extra || []) { put(d, rs); }
   const absent = new Map();
   const now = new Date().toISOString();
   for (const d of targetDomains(cfg)) { if (!entries.has(d)) { absent.set(d, now); } }
-  return buildHealthBlock(entries, absent);
+  return buildHealthBlock(entries, absent, extras);
 }
 
 // 全灭护栏（写入前判定）：新块一条有效 IP 都没有、而 hosts 里还有旧条目时，必须拒绝写入 ——
@@ -107,34 +128,53 @@ export function decide(probeResults, current, cfg) {
 //        显式报出来，否则日志只写「无变化」会让人以为工具没干活）
 export function applyDelta(current, ranked, extra, diagnose, cfg) {
   const entries = new Map(current.entries);
+  const extras = new Map(current.extras || []);
   const absent = new Map(current.absent);
   const changed = [];
   const now = new Date().toISOString();
   const allResult = new Map([...ranked, ...extra]);
+  const maxPer = Math.max(1, cfg.hosts?.maxEntriesPerDomain ?? 2);
 
   for (const d of diagnose) {
-    const best = (allResult.get(d) || [])[0];
+    const list = allResult.get(d) || [];
+    const best = list[0];
     if (best) {
       if (entries.get(d) !== best.ip) { entries.set(d, best.ip); changed.push(d); }
+      const alt = list.slice(1, maxPer).map((x) => x.ip);
+      if (alt.length) { extras.set(d, alt); } else { extras.delete(d); }
       absent.delete(d);
     } else if (!entries.has(d)) {
       absent.set(d, now);
     }
   }
 
-  // orphan 清理：hosts 块里已不在配置（含兜底）中的域名，无条件删除
+  // orphan 清理：hosts 块里已不在配置（含兜底）中的域名，无条件删除（主 IP 与备选一起删）
   const allow = new Set(targetDomains(cfg));
   for (const d of [...entries.keys()]) {
     if (!allow.has(d)) { entries.delete(d); changed.push(d); }
   }
+  for (const d of [...extras.keys()]) {
+    if (!allow.has(d) || !entries.has(d)) { extras.delete(d); }
+  }
   // orphan 已在上一步删掉，这里只剩「配置内、诊断过、却没探到活 IP、于是保留旧值」的域名
   const stuck = diagnose.filter((d) => allow.has(d) && entries.has(d) && !(allResult.get(d) || []).length);
-  return { entries, absent, changed, stuck };
+  return { entries, extras, absent, changed, stuck };
 }
 
 function sameMap(a, b) {
   if (a.size !== b.size) { return false; }
   for (const [k, v] of a) { if (b.get(k) !== v) { return false; } }
+  return true;
+}
+
+// 比较「域名 -> 备选 IP 数组」是否一致（值是有序数组，不能直接套 sameMap）
+function sameExtras(a, b) {
+  if (a.size !== b.size) { return false; }
+  for (const [k, v] of a) {
+    const w = b.get(k);
+    if (!w || w.length !== v.length) { return false; }
+    for (let i = 0; i < v.length; i++) { if (v[i] !== w[i]) { return false; } }
+  }
   return true;
 }
 
@@ -176,13 +216,14 @@ async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath
 
   const entriesChanged = !sameMap(d.entries, current.entries);
   const absentChanged = !sameMap(d.absent, current.absent);
+  const extrasChanged = !sameExtras(d.extras, current.extras || new Map());
   const stuckNote = d.stuck.length ? `；无可用 IP 保留原值: ${d.stuck.join(", ")}` : "";
-  if (!entriesChanged && !absentChanged) {
+  if (!entriesChanged && !absentChanged && !extrasChanged) {
     say(`探测无变化，保持现状（护栏/粘性生效）${stuckNote}`);
     return { action: "none", reason: `无变化${stuckNote}`, block: null, stuck: d.stuck };
   }
 
-  const block = buildHealthBlock(d.entries, d.absent);
+  const block = buildHealthBlock(d.entries, d.absent, d.extras);
   const msg = d.changed.length ? `更新域名: ${d.changed.join(", ")}` : "更新缺失域名冷却记录";
   if (write) {
     const lock = acquireHostsLock();
