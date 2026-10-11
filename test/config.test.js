@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // config 合并单测：验证用户只覆盖子属性时不会清空默认兄弟属性
 import { test } from "node:test";
 import assert from "node:assert/strict";

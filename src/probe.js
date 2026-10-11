@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // 一轮完整探测：DoH 候选 + 内置池 -> 三关并发探测 -> 排名 -> 兜底轮
 import { resolveAll } from "./doh.js";
 import { probeIp, pool } from "./prober.js";

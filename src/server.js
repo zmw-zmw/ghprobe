@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // 内置 HTTP API：既是测试钩子也是状态面板数据源
 // GET  /api/status  最近一轮结果
 // POST /api/probe   立即触发一轮探测（跑完返回摘要）

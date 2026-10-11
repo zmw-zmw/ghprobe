@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // ghprobe CLI：probe / serve / hosts / install / uninstall
 import path from "node:path";
 import fs from "node:fs";

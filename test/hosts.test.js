@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // 离线单测：hosts 块生成与合并替换
 import { test } from "node:test";
 import assert from "node:assert/strict";

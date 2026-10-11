@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // 接口测试：serve HTTP API 全端点走一遍（探测用替身注入，不打真网络）
 import { test, after } from "node:test";
 import assert from "node:assert/strict";

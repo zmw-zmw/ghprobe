@@ -141,4 +141,25 @@ schedule: { intervalHours: 6 }
 
 ## License
 
-GPL-3.0
+本项目以 **GNU General Public License v3.0**（SPDX 标识符：`GPL-3.0`）发布。
+
+```
+Copyright (C) 2026 zmw
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+```
+
+你可以自由地运行、研究、修改和再分发本软件，但需满足 GPL-3.0 的以下条件：
+
+- **开源传染（copyleft）**：分发本软件或其衍生作品时，必须一并提供完整对应源码，且衍生作品须以**相同协议**授权
+- **保留声明**：不得移除版权声明、许可声明与免责声明
+- **无担保**：作者不提供任何明示或默示担保（详见 GPL-3.0 第 15、16 条）
+
+完整协议文本见仓库根目录的 [`LICENSE`](LICENSE)；每个源文件头部均带 `SPDX-License-Identifier: GPL-3.0` 声明。

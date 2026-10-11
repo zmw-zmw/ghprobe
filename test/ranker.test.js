@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0
+// Copyright (C) 2026 zmw
 // 离线单测：排名与兜底链决策
 import { test } from "node:test";
 import assert from "node:assert/strict";
