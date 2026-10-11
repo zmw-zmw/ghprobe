@@ -279,6 +279,17 @@ test("buildHiddenRunnerVbs: ShowWindow 传 0(SW_HIDE) 且等待子进程结束",
   assert.ok(vbs.includes('CreateObject("WScript.Shell")'));
 });
 
+// 回归用例：这个文件以 "ascii" 编码落盘（wscript 对无 BOM 的 .vbs 按 ANSI 解析），
+// 一旦注释里混进中文，高位字节被掩掉，用户在文件里看到的就是一串乱码/方块。
+test("buildHiddenRunnerVbs: 内容必须纯 ASCII（否则 ascii 落盘会变乱码）", () => {
+  const vbs = buildHiddenRunnerVbs("C:\\node\\node.exe", "C:\\pkg\\bin\\ghprobe.js", "health --apply");
+  // eslint-disable-next-line no-control-regex
+  const nonAscii = [...vbs].filter((c) => c.charCodeAt(0) > 126 || c.charCodeAt(0) < 9);
+  assert.deepEqual(nonAscii, [], `存在非 ASCII 字符: ${JSON.stringify(nonAscii)}`);
+  // 用 ascii 编码往返一次，内容必须不变（等价于「落盘后不会被改写」）
+  assert.equal(Buffer.from(vbs, "ascii").toString("ascii"), vbs);
+});
+
 test("buildHiddenRunnerVbs: 带空格路径的引号在 VBS 字符串里成对转义", () => {
   const vbs = buildHiddenRunnerVbs("C:\\Program Files\\nodejs\\node.exe", "C:\\a b\\ghprobe.js", "health --apply");
   const line = vbs.split(/\r?\n/).find((l) => l.startsWith("sh.Run"));
