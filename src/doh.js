@@ -49,9 +49,13 @@ export function parseA(buf) {
 }
 
 // 单端点 DoH 查询：POST wire 报文，IP 直连 + 可选 SNI 覆盖（证书仍按 servername 校验）
+// 应答只校验 query ID 是否与请求一致，不单独解析 question 段：端点是我们主动 TLS 直连的已知服务器，
+// 信道经过证书校验，且 ID 已匹配，足以排除响应错位与缓存投毒；question 段校验属防御性冗余，不做
 export function queryDoh(ep, name, timeoutMs) {
   return new Promise((resolve) => {
     const t0 = Date.now();
+    const qid = (Math.random() * 65536) | 0;
+    const qbuf = buildQuery(qid, name);
     const req = https.request({
       host: ep.host, path: ep.path || "/dns-query",
       method: "POST", timeout: timeoutMs,
@@ -63,13 +67,16 @@ export function queryDoh(ep, name, timeoutMs) {
       res.on("data", (c) => chunks.push(c));
       res.on("end", () => {
         const body = Buffer.concat(chunks);
-        const rcode = body.length > 3 ? body[3] & 0x0f : -1;
+        if (body.length < 12) { resolve({ ep, ok: false, ms: Date.now() - t0, ips: [], err: "short response" }); return; }
+        const rid = body.readUInt16BE(0);
+        if (rid !== qid) { resolve({ ep, ok: false, ms: Date.now() - t0, ips: [], err: `id mismatch ${rid}!==${qid}` }); return; }
+        const rcode = body[3] & 0x0f;
         resolve({ ep, ok: res.statusCode === 200 && rcode === 0, ms: Date.now() - t0, ips: rcode === 0 ? parseA(body) : [], err: res.statusCode !== 200 ? `http ${res.statusCode}` : `rcode ${rcode}` });
       });
     });
     req.on("timeout", () => { req.destroy(); resolve({ ep, ok: false, ms: Date.now() - t0, ips: [], err: "timeout" }); });
     req.on("error", (e) => resolve({ ep, ok: false, ms: Date.now() - t0, ips: [], err: String(e.code || e.message).slice(0, 60) }));
-    req.end(buildQuery((Math.random() * 65536) | 0, name));
+    req.end(qbuf);
   });
 }
 

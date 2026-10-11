@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
-// 离线单测：hosts 块生成与合并替换
+// 离线单测：hosts 块生成与合并替换 + 跨进程写锁
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildBlock, mergeHosts } from "../src/hosts.js";
+import fs from "node:fs";
+import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK } from "../src/hosts.js";
 
 const ranked = new Map([["github.com", [{ ip: "20.205.243.166" }, { ip: "20.27.177.113" }]]]);
 const extra = new Map([["cdn.jsdelivr.net", [{ ip: "104.16.0.1" }]]]);
@@ -30,4 +31,16 @@ test("mergeHosts: 无旧块时追加", () => {
   const merged = mergeHosts("127.0.0.1 localhost", buildBlock(ranked, new Map()));
   assert.ok(merged.includes("20.205.243.166 github.com"));
   assert.ok(merged.includes("127.0.0.1 localhost"));
+});
+
+test("acquireHostsLock: 独占 + 冲突超时放弃 + 释放后可再拿", () => {
+  try { fs.unlinkSync(HOSTS_LOCK); } catch { /* 无残留即无锁 */ }
+  const fd = acquireHostsLock(800, 50);
+  assert.ok(fd != null, "首次应拿到锁");
+  const fd2 = acquireHostsLock(300, 50);
+  assert.equal(fd2, null, "已被持有，短暂自旋后放弃本轮");
+  releaseHostsLock(fd);
+  const fd3 = acquireHostsLock(800, 50);
+  assert.ok(fd3 != null, "释放后应能再次拿到");
+  releaseHostsLock(fd3);
 });

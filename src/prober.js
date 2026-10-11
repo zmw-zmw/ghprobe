@@ -39,9 +39,9 @@ export const DOMAIN_SIG = {
   "gist.githubusercontent.com": {
     path: "/",
     mustContain: [],
-    allow: [200, 204, 302, 303, 304, 307, 308, 400, 401, 403, 404],
+    allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404],
     reject: ["unknown domain", "Fastly error"],
-    redirectHosts: ["gist.githubusercontent.com"],
+    redirectHosts: ["gist.githubusercontent.com", "gist.github.com"],
   },
   "avatars.githubusercontent.com": {
     path: "/u/1?v=4",
@@ -50,15 +50,24 @@ export const DOMAIN_SIG = {
     reject: ["unknown domain", "Fastly error"],
     redirectHosts: ["avatars.githubusercontent.com"],
   },
+  "cdn.jsdelivr.net": {
+    path: "/gh/torvalds/linux@master/README",
+    mustContain: ["Linux kernel"],
+    allow: [200, 204, 301, 302, 303, 304, 307, 308],
+    reject: ["unknown domain", "Fastly error"],
+    redirectHosts: ["cdn.jsdelivr.net", "www.jsdelivr.com", "jsdelivr.net"],
+  },
 };
 
 // 3xx Location 跳到该域名不允许的 host（如 codeload 坏节点跳回 github.com 主站）则判死
+// redirectHosts 未配置或为空数组时表示"不检查跳转"，避免兜底域名被误杀
 function badRedirect(statusCode, location, sig) {
   if (!location || statusCode < 300 || statusCode >= 400) { return false; }
-  let host;
-  try { host = new URL(location).host; } catch { return false; }
-  const allowed = new Set(sig.redirectHosts || [Object.keys(DOMAIN_SIG).find((k) => DOMAIN_SIG[k] === sig) || ""]);
-  return !allowed.has(host);
+  const hosts = sig.redirectHosts;
+  if (!hosts || hosts.length === 0) { return false; }
+  let h;
+  try { h = new URL(location).host; } catch { return false; }
+  return !new Set(hosts).has(h);
 }
 
 // 一条 TLS 连接同时量出 TCP 与 TLS 两段耗时
@@ -116,7 +125,7 @@ export function checkHttpResponse(statusCode, body, location, sig) {
 // 第三关：HTTP GET（host=IP、SNI=域名、Host头=域名），读少量响应体做终审
 function httpProbe(ip, domain, httpMs) {
   return new Promise((resolve) => {
-    const sig = DOMAIN_SIG[domain] || { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404], reject: ["unknown domain", "Fastly error"] };
+    const sig = DOMAIN_SIG[domain] || { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404], reject: ["unknown domain", "Fastly error"], redirectHosts: [] };
     const t0 = Date.now();
     const req = https.request({
       host: ip, servername: domain, method: "GET", path: sig.path, timeout: httpMs,

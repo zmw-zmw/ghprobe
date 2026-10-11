@@ -10,6 +10,41 @@ export const WIN_HOSTS = "C:\\Windows\\System32\\drivers\\etc\\hosts";
 const BEGIN = "# === ghprobe begin ===";
 const END = "# === ghprobe end ===";
 
+// 写 hosts 跨进程锁：probe --apply 与计划任务（health --apply）可能并发，避免读改写互踩
+export const HOSTS_LOCK = path.join(os.tmpdir(), "ghprobe-hosts.lock");
+const LOCK_STALE_MS = 60000;
+
+function sleepSync(ms) {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+
+// 抢写锁：wx 独占创建，冲突每 retryMs 重试，最多 timeoutMs；超时返回 null 表示本轮放弃。
+// 锁文件带随机 PID+时间戳；超出 LOCK_STALE_MS 视为持有进程崩溃残留，强清后重试。
+export function acquireHostsLock(timeoutMs = 5000, retryMs = 200) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(HOSTS_LOCK, "wx");
+      fs.writeSync(fd, `${process.pid} ${Date.now()}\n`);
+      return fd;
+    } catch (e) {
+      if (e.code !== "EEXIST") { throw e; }
+      try {
+        const st = fs.statSync(HOSTS_LOCK);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) { fs.unlinkSync(HOSTS_LOCK); continue; }
+      } catch { continue; } // 锁刚被持有者释放
+    }
+    if (Date.now() >= deadline) { return null; }
+    sleepSync(retryMs);
+  }
+}
+
+export function releaseHostsLock(fd) {
+  try { if (fd != null) { fs.closeSync(fd); } } catch { /* 忽略 */ }
+  try { fs.unlinkSync(HOSTS_LOCK); } catch { /* 忽略 */ }
+}
+
 // 从 ranked(域名->有序IP列表) 生成 hosts 块；Windows 同一域名只取第一条生效，故每域名仅写最优 1 条
 export function buildBlock(ranked, extraDomains) {
   const lines = [BEGIN, `# generated ${new Date().toISOString()} by ghprobe`];
@@ -39,27 +74,24 @@ export function mergeHosts(current, block) {
   return merged.endsWith("\n") ? merged : merged + "\n";
 }
 
-function writePs1(script) {
+// 写临时 ps1 -> 弹 UAC 提权执行 -> 取回被提升进程 ExitCode -> 清理 ps1（apply/restore/install 复用）
+export async function runElevated(content) {
   const tmp = path.join(os.tmpdir(), `ghprobe-${Date.now()}.ps1`);
-  fs.writeFileSync(tmp, script, "utf8");
-  return tmp;
-}
-
-function runElevated(ps1) {
+  fs.writeFileSync(tmp, content, "utf8");
   return new Promise((resolve, reject) => {
     // 用 Start-Process -Verb RunAs 弹 UAC 提权，-PassThru -Wait 取回被提升进程 ExitCode
-    const cmd = `$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${ps1}'; exit $p.ExitCode`;
+    const cmd = `$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${tmp}'; exit $p.ExitCode`;
     const child = execFile("powershell", ["-NoProfile", "-Command", cmd], { windowsVerbatimArguments: true });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => { out += d; });
     child.stderr?.on("data", (d) => { err += d; });
     child.on("close", (code) => {
-      try { fs.unlinkSync(ps1); } catch { /* 清理失败不管 */ }
+      try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
       resolve({ code, out, err });
     });
     child.on("error", (e) => {
-      try { fs.unlinkSync(ps1); } catch { /* 清理失败不管 */ }
+      try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
       reject(e);
     });
   });
@@ -92,10 +124,13 @@ try {
   exit 1
 }
 `;
-  const ps1 = writePs1(script);
-  const r = await runElevated(ps1);
-  if (r.code !== 0) { throw new Error(`提权写入失败: ${r.err || r.out}`); }
-  return { ok: true, backup: bak };
+  try {
+    const r = await runElevated(script);
+    if (r.code !== 0) { throw new Error(`提权写入失败: ${r.err || r.out}`); }
+    return { ok: true, backup: bak };
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
+  }
 }
 
 // 还原 hosts：优先用备份恢复；无备份则移除 ghprobe 块后写回；最后刷 DNS 缓存
@@ -119,8 +154,7 @@ try {
   exit 1
 }
 `;
-  const ps1 = writePs1(script);
-  const r = await runElevated(ps1);
+  const r = await runElevated(script);
   if (r.code !== 0) { throw new Error(`还原 hosts 失败: ${r.err || r.out}`); }
   return { ok: true };
 }

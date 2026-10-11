@@ -66,8 +66,26 @@ test("checkHttpResponse: 未知状态码判死", () => {
   assert.ok(r.err.includes("status:418"));
 });
 
-test("DOMAIN_SIG 覆盖全部默认目标域名", () => {
-  for (const d of ["github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "gist.githubusercontent.com", "avatars.githubusercontent.com"]) {
+test("gist 根路径 301 跳到 gist.github.com 放行", () => {
+  const gist = DOMAIN_SIG["gist.githubusercontent.com"];
+  const r = checkHttpResponse(301, "", "https://gist.github.com/", gist);
+  assert.equal(r.ok, true);
+});
+
+test("jsdelivr 真实 CDN 路径 200 放行", () => {
+  const js = DOMAIN_SIG["cdn.jsdelivr.net"];
+  const r = checkHttpResponse(200, "The Linux kernel source tree", null, js);
+  assert.equal(r.ok, true);
+});
+
+test("未知域名默认指纹：3xx 跳转不拦截", () => {
+  const fallback = { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404], reject: ["unknown domain", "Fastly error"], redirectHosts: [] };
+  const r = checkHttpResponse(301, "", "https://www.jsdelivr.com/", fallback);
+  assert.equal(r.ok, true);
+});
+
+test("DOMAIN_SIG 覆盖全部默认目标域名及兜底 CDN", () => {
+  for (const d of ["github.com", "codeload.github.com", "objects.githubusercontent.com", "raw.githubusercontent.com", "gist.githubusercontent.com", "avatars.githubusercontent.com", "cdn.jsdelivr.net"]) {
     assert.ok(DOMAIN_SIG[d], `缺少 ${d} 的指纹`);
     assert.ok(DOMAIN_SIG[d].allow.length > 0);
     assert.ok(DOMAIN_SIG[d].reject.length > 0);

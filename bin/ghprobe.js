@@ -9,10 +9,17 @@ import { spawnSync } from "node:child_process";
 import { Command } from "commander";
 import { loadConfig } from "../src/config.js";
 import { probeNow, startServer } from "../src/server.js";
-import { buildBlock, mergeHosts, applyHosts, restoreHosts, WIN_HOSTS } from "../src/hosts.js";
+import { runHealth } from "../src/health.js";
+import { buildBlock, mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+// 严格仅 Windows：hosts 路径硬编码 + Start-Process 提权 + ipconfig，非 Windows 直接给清晰报错
+if (process.platform !== "win32") {
+  console.error("ghprobe 当前仅支持 Windows：hosts 路径与提权机制依赖 Windows 系统");
+  process.exit(1);
+}
 const program = new Command();
 program.name("ghprobe").description("GitHub 直连优选：本地 DoH + TLS 证书终审探测 + hosts 生成（无代理）").version("0.1.0");
 
@@ -43,10 +50,17 @@ program.command("probe")
       printSummary(r);
     }
     if (opts.apply) {
-      const block = buildBlock(r.ranked, r.extra);
-      const merged = mergeHosts(readFileSync(WIN_HOSTS, "utf8"), block);
-      const res = await applyHosts(merged);
-      console.log(`hosts 已写入，备份在 ${res.backup}`);
+      const lock = acquireHostsLock();
+      if (!lock) {
+        console.error("另一进程正在写 hosts，本轮跳过（下轮健康检查会自动补写）");
+      } else {
+        try {
+          const block = buildBlock(r.ranked, r.extra);
+          const merged = mergeHosts(readFileSync(WIN_HOSTS, "utf8"), block);
+          const res = await applyHosts(merged);
+          console.log(`hosts 已写入，备份在 ${res.backup}`);
+        } finally { releaseHostsLock(lock); }
+      }
     }
   });
 
@@ -69,21 +83,38 @@ program.command("hosts")
     console.log(buildBlock(r.ranked, r.extra));
   });
 
-program.command("install")
-  .description("注册 Windows 计划任务：定时探测并写入 hosts")
-  .option("-c, --config <path>", "用户配置覆盖（间隔取 schedule.intervalHours）")
+program.command("health")
+  .description("健康检查：只测已写入 IP，异常才全量重排换 IP（加 --apply 才写 hosts）")
+  .option("-c, --config <path>", "用户配置覆盖")
+  .option("-a, --apply", "检测到异常时写入系统 hosts（会弹 UAC）")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
-    const hours = cfg.schedule.intervalHours || 6;
+    const r = await runHealth(cfg, (m) => console.error(m), Boolean(opts.apply));
+    // 计划任务静默运行，stdout/stderr 都丢；每轮结果追加日志文件，跑挂了能查到
+    const entry = `${new Date().toISOString()} health action=${r.action} reason=${r.reason}${r.changed && r.changed.length ? ` changed=${r.changed.join(",")}` : ""}\n`;
+    try { fs.appendFileSync(path.join(ROOT, "ghprobe.log"), entry); } catch { /* 日志写失败不影响主流程 */ }
+  });
+
+program.command("install")
+  .description("注册 Windows 计划任务：定时健康检查，异常才全量换 IP 并写 hosts")
+  .option("-c, --config <path>", "用户配置覆盖（间隔取 schedule.healthMin 分钟）")
+  .action(async (opts) => {
+    const cfg = loadConfig(opts.config);
+    const minutes = cfg.schedule?.healthMin || 5;
     const bin = path.join(ROOT, "bin", "ghprobe.js");
     // 用 Register-ScheduledTask 而非 schtasks：/TR 的嵌套引号在 cmd 里必打架
+    // RunLevel Highest：任务以管理员权限静默运行，applyHosts 不再额外弹 UAC
+    // UserId 必须用 COMPUTERNAME\USERNAME（裸用户名非合法 UserId，会 E_INVALIDARG）
+    // 注册本身需管理员权限，故整段放进 runElevated 自提权执行
     const cfgArg = opts.config ? ` -c "${opts.config}"` : "";
-    const ps = `$a = New-ScheduledTaskAction -Execute '${process.execPath}' -Argument '"${bin}" probe --apply${cfgArg}';`
-      + ` $t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours ${hours});`
-      + ` Register-ScheduledTask -TaskName ghprobe -Action $a -Trigger $t -Force | Out-Null`;
-    const p = spawnSync("powershell", ["-NoProfile", "-Command", ps], { encoding: "utf8" });
-    if (p.status === 0) { console.log(`计划任务 ghprobe 已注册：每 ${hours} 小时探测并写入 hosts（probe --apply）`); }
-    else { console.error(`注册失败: ${p.stderr || p.stdout}`); process.exitCode = 1; }
+    const script = `$ErrorActionPreference = 'Stop';`
+      + ` $a = New-ScheduledTaskAction -Execute '${process.execPath}' -Argument '"${bin}" health --apply${cfgArg}';`
+      + ` $t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${minutes});`
+      + ` $p = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\$env:USERNAME" -LogonType Interactive -RunLevel Highest;`
+      + ` Register-ScheduledTask -TaskName ghprobe -Action $a -Trigger $t -Principal $p -Force | Out-Null`;
+    const r = await runElevated(script);
+    if (r.code === 0) { console.log(`计划任务 ghprobe 已注册：每 ${minutes} 分钟健康检查（health --apply，runlevel=highest）`); }
+    else { console.error(`注册失败: ${r.err || r.out}`); process.exitCode = 1; }
   });
 
 program.command("uninstall")
