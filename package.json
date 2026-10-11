@@ -7,6 +7,14 @@
   "main": "bin/ghprobe.js",
   "engines": { "node": ">=18" },
   "license": "GPL-3.0-or-later",
+  "files": [
+    "bin/",
+    "src/",
+    "config.default.yaml",
+    "install.ps1",
+    "install.cmd",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "test": "node --test",
     "serve": "node bin/ghprobe.js serve",

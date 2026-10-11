@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom, buildApplyScript, buildRestoreScript } from "../src/hosts.js";
+import { buildBlock, mergeHosts, acquireHostsLock, releaseHostsLock, HOSTS_LOCK, buildElevateCommand, runElevationWrapper, buildUninstallTaskScript, writePs1WithBom, buildApplyScript, buildRestoreScript, buildInstallScript } from "../src/hosts.js";
 
 const ranked = new Map([["github.com", [{ ip: "20.205.243.166" }, { ip: "20.27.177.113" }]]]);
 const extra = new Map([["cdn.jsdelivr.net", [{ ip: "104.16.0.1" }]]]);
@@ -235,4 +235,33 @@ test("buildRestoreScript 实跑：剥块 + 保留第三方条目 + 非 ASCII 字
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
   }
+});
+
+// ── install：一次提权完成「写 hosts + 注册任务」（E1）──────────────────
+test("buildInstallScript: 写 hosts 段不得提前 exit，否则任务注册被跳过", () => {
+  const s = buildInstallScript({
+    hostsPath: "C:\\Windows\\System32\\drivers\\etc\\hosts", tmpPath: "C:\\tmp\\x.tmp",
+    nodePath: "C:\\node\\node.exe", binPath: "C:\\pkg\\bin\\ghprobe.js", cfgArg: "", minutes: 5, writeHosts: true,
+  });
+  assert.ok(s.includes("Copy-Item -Force $tmp $src"), "缺少写 hosts 步骤");
+  assert.ok(s.includes("Register-ScheduledTask -TaskName ghprobe"), "缺少注册计划任务");
+  assert.ok(s.includes("New-ScheduledTaskPrincipal") && s.includes("-RunLevel Highest"), "任务必须以最高权限注册（否则写 hosts 会再弹 UAC）");
+  assert.ok(s.includes("New-ScheduledTaskTrigger") && s.includes("New-TimeSpan -Minutes 5"), "缺少按 schedule.healthMin 的重复触发器");
+  assert.ok(s.includes("-LogonType Interactive"), "LogonType 应为 Interactive");
+  // 关键：写 hosts 的失败分支不得提前退出，否则后面的注册根本执行不到
+  const iWrite = s.indexOf("Copy-Item -Force $tmp $src");
+  const iReg = s.indexOf("Register-ScheduledTask");
+  const iFirstExit = s.indexOf("exit ", iWrite);
+  assert.ok(iReg > iWrite, "注册应在写 hosts 之后");
+  assert.ok(iFirstExit === -1 || iReg < iFirstExit, "写 hosts 段提前 exit 会让任务注册被跳过");
+  assert.ok(s.includes("[Text.Encoding]::Default"), "读写应用系统 ANSI 编码");
+});
+
+test("buildInstallScript: writeHosts=false 时不碰 hosts，但仍注册任务", () => {
+  const s = buildInstallScript({
+    hostsPath: "C:\\h", tmpPath: "C:\\t", nodePath: "n", binPath: "b", cfgArg: "", minutes: 5, writeHosts: false,
+  });
+  assert.ok(!s.includes("Copy-Item -Force $tmp $src"), "--skip-probe 时不应写 hosts");
+  assert.ok(s.includes("$hostsOk = $true"), "跳过写 hosts 时应把该步视为通过");
+  assert.ok(s.includes("Register-ScheduledTask"), "仍应注册任务");
 });

@@ -60,7 +60,24 @@ flowchart LR
 > 探测 / 排名 / DoH / HTTP API 等核心逻辑本身跨平台（CI 也在 ubuntu 上跑这部分），
 > 在 Linux/macOS 上可以跑 `probe` 看结果，但**不会**（也无法）写系统 hosts。
 
-### 一键部署（推荐，装完之后不用再碰命令行）
+### 方式一：npm 安装（推荐）
+
+```bash
+npm install -g ghprobe
+```
+
+之后在 **PowerShell 或 cmd** 里，两条命令搞定：
+
+```bash
+ghprobe install     # 开启：探测并写入 hosts + 注册计划任务（全程只弹一次 UAC）
+ghprobe uninstall   # 停止：删除计划任务并还原 hosts
+```
+
+开启后就不用再敲命令了：每 5 分钟自动健康检查，IP 陈旧时自动重排。
+
+> 包尚未发布到 npm 时，可在仓库目录执行 `npm install -g .` 达到同样效果。
+
+### 方式二：克隆仓库一键部署
 
 双击 `install.cmd`，或在 PowerShell 里执行：
 

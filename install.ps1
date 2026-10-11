@@ -85,16 +85,16 @@ if ($Uninstall) {
   exit 0
 }
 
-# ── 4b. 注册计划任务（当前已是管理员，内部不会再弹 UAC）──────────────
-Say "注册计划任务（每 5 分钟健康检查，异常才全量换 IP）…"
-& node $Cli install
-if ($LASTEXITCODE -ne 0) { Say "错误：注册计划任务失败"; exit 1 }
-
-# ── 5. 立即写入一次 hosts，装完即用 ──────────────────────────────────
-if (-not $SkipProbe) {
-  Say "立即跑一次全量探测并写入 hosts（约 1 分钟）…"
-  & node $Cli probe --apply
+# ── 4b. 写 hosts + 注册计划任务（当前已是管理员，内部不会再弹 UAC）────
+# `ghprobe install` 先探测、再在一次提权里同时完成「写 hosts」与「注册任务」
+if ($SkipProbe) {
+  Say "注册计划任务（每 5 分钟健康检查，异常才全量换 IP）…"
+  & node $Cli install --skip-probe
+} else {
+  Say "探测并写入 hosts，同时注册计划任务（约 1 分钟）…"
+  & node $Cli install
 }
+if ($LASTEXITCODE -ne 0) { Say "错误：安装失败"; exit 1 }
 
 # ── 6. 自检：不信任命令行自报的成功 ──────────────────────────────────
 $task = Get-ScheduledTask -TaskName 'ghprobe' -ErrorAction SilentlyContinue

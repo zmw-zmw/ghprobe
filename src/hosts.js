@@ -104,6 +104,47 @@ export function buildUninstallTaskScript(taskName = "ghprobe") {
     + ` exit 0`;
 }
 
+// 构造「写入 hosts + 注册计划任务」的提权脚本（install 用）：一次 UAC 完成两件事。
+// 与 buildApplyScript 的区别：中途不 exit，两件事都做完后再按综合结果返回退出码，
+// 这样 install 只需弹一次 UAC，且能拿到「两件事各自成功与否」的确定结果。
+export function buildInstallScript({ hostsPath, tmpPath, nodePath, binPath, cfgArg = "", minutes = 5, writeHosts = true }) {
+  const bak = `${hostsPath}.ghprobe-bak`;
+  const hostsPart = writeHosts ? `
+try {
+  Copy-Item -Force $src $bak
+  Copy-Item -Force $tmp $src
+  $now = [IO.File]::ReadAllText($src, $enc)
+  if ($now -match [regex]::Escape($marker)) { $hostsOk = $true }
+  else { Copy-Item -Force $bak $src; [Console]::Error.WriteLine('hosts 校验失败：未找到 ghprobe 标记，已回滚') }
+} catch {
+  if (Test-Path $bak) { Copy-Item -Force $bak $src }
+  [Console]::Error.WriteLine('hosts 写入失败: ' + $_.Exception.Message)
+}
+if ($hostsOk) { ipconfig /flushdns | Out-Null }` : "";
+  return `
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+$src = '${hostsPath}'
+$tmp = '${tmpPath}'
+$bak = '${bak}'
+$marker = '${BEGIN}'
+$enc = [Text.Encoding]::Default
+$hostsOk = $${writeHosts ? "false" : "true"}
+${hostsPart}
+$taskOk = $false
+try {
+  $a = New-ScheduledTaskAction -Execute '${nodePath}' -Argument '"${binPath}" health --apply${cfgArg}'
+  $t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes ${minutes})
+  $p = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+  Register-ScheduledTask -TaskName ghprobe -Action $a -Trigger $t -Principal $p -Force | Out-Null
+  $taskOk = $true
+} catch {
+  [Console]::Error.WriteLine('注册计划任务失败: ' + $_.Exception.Message)
+}
+if ($hostsOk -and $taskOk) { exit 0 }
+exit 1
+`;
+}
+
 // 跑一段 PowerShell 命令，回传 { code, out, err }
 function runPowerShellCommand(cmd) {
   return new Promise((resolve, reject) => {

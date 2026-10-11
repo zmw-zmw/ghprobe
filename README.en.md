@@ -61,7 +61,26 @@ Requires Node.js >= 18.
 > HTTP API) is cross-platform (CI runs it on ubuntu too) — on Linux/macOS you can run `probe` to
 > see results, but it will **not** (and cannot) write the system hosts file.
 
-### One-click install (recommended — no command line afterwards)
+### Option 1: install from npm (recommended)
+
+```bash
+npm install -g ghprobe
+```
+
+Then, in **PowerShell or cmd**, two commands are all it takes:
+
+```bash
+ghprobe install     # start: probe + write hosts + register the scheduled task (a single UAC prompt)
+ghprobe uninstall   # stop: remove the scheduled task and restore hosts
+```
+
+After that you never touch the command line again: it health-checks every 5 minutes and re-ranks
+automatically when IPs go stale.
+
+> If the package is not published to npm yet, run `npm install -g .` inside the repository directory
+> for the same effect.
+
+### Option 2: clone and one-click deploy
 
 Double-click `install.cmd`, or run in PowerShell:
 
