@@ -60,7 +60,9 @@ if (process.platform !== "win32") {
   process.exit(1);
 }
 const program = new Command();
-program.name("ghprobe").description("GitHub 直连优选：本地 DoH + TLS 证书终审探测 + hosts 生成（无代理）").version("0.1.0");
+// 版本号从 package.json 读，不写死 —— 否则 npm version 之后 --version 会漂移
+const PKG = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"));
+program.name("ghprobe").description("GitHub 直连优选：本地 DoH + TLS 证书终审探测 + hosts 生成（无代理）").version(PKG.version);
 
 // 打印一轮结果的可读摘要
 function printSummary(r) {
