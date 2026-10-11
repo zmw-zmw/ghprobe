@@ -334,48 +334,34 @@ ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自�
 
 ## 5. 关于「为什么还会出现 cdn.jsdelivr.net」
 
-有用户问：**「我这个是专门为 GitHub 加速的，其它国内镜像为什么要加速？」**
+**`cdn.jsdelivr.net` 不是国内镜像**，它是 jsDelivr 的公共 CDN（走 Cloudflare）。它进 hosts 的唯一原因是**兜底链**。
 
-先把措辞说准：**`cdn.jsdelivr.net` 不是「国内镜像」**。它是 jsDelivr 的 CDN（走 Cloudflare），是一个全球性的公共 CDN，跟「国内镜像站」是两回事。
-
-它为什么会出现在 hosts 里？**唯一原因是兜底链**。
-
-回顾第 1 节的故障分层：有一种故障叫 **SNI 主机名黑名单** —— 被封锁的是**主机名本身**。这时 TLS 握手里的 SNI 就带着那个被封锁的域名，**换任何 IP 都没用**：你换到天涯海角的 IP，握手时客户端照样要说出被封锁的域名，一样被掐断。这种情况下，唯一的出路是**换域名**去取同一份内容。
-
-jsDelivr 提供了一个直接把 GitHub 仓库文件映射出来的路径：
+有一种故障是 **SNI 主机名黑名单** —— 被封锁的是主机名本身，TLS 握手里的 SNI 带着那个域名，**换任何 IP 都没用**，只能**换域名**。jsDelivr 提供 GitHub 文件的直接映射：
 
 ```text
-https://cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>
+raw.githubusercontent.com/<user>/<repo>/<ref>/<path>
+cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>     ← 同一份内容
 ```
 
-也就是说，`raw.githubusercontent.com/<user>/<repo>/<ref>/<path>` 上的那份文件内容，可以从 `cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>` 拿到 —— 这是「同一份内容的另一个可访问入口」。所以当 `raw.githubusercontent.com` 被 SNI 层封锁、主候选全灭时，ghprobe 会用 jsDelivr 作为**兜底入口**，保证这类文件至少有一条路可走。
+所以当 `raw.githubusercontent.com` 被 SNI 封锁、主候选全灭时，ghprobe 用它兜底。
 
-**几个必须说清楚的前提：**
+前提：
 
-- **默认配置里只有 `raw.githubusercontent.com` 配了这条兜底**：
-  ```yaml
-  fallbacks:
-    raw.githubusercontent.com: [cdn.jsdelivr.net]
-  ```
-- **主域名 `github.com` / `codeload.github.com` 从不走兜底**。它们只在官方域名族里选 IP。
-- **兜底只在主候选「全灭」时才触发**。主域名只要有任何一条活 IP，就不会去探兜底域名。
-- 兜底命中后，写入的是**兜底域名的 IP**（即 `cdn.jsdelivr.net` 的 IP），不是 `raw.githubusercontent.com` 的 —— 因为这时候要救的是「换域名」而不是「换 IP」。
+- 默认只有 `raw.githubusercontent.com` 配了兜底；`github.com` / `codeload.github.com` 从不走兜底。
+- 只在主候选**全灭**时触发，有任一活 IP 就不探兜底。
+- 命中后写入的是 `cdn.jsdelivr.net` 的 IP —— 救的是「换域名」，不是「换 IP」。
 
-**如果你不想要这个兜底**，完全可以去掉：
+不想要就清空 `fallbacks`（`--config` 覆盖是递归合并，给空对象即可）：
 
-- 编辑 `config.default.yaml`，把 `fallbacks` 段清空：
-  ```yaml
-  fallbacks: {}
-  ```
-- 或者用自己的 `--config` 覆盖（对象是递归合并的，`fallbacks` 直接给空对象即可）：
-  ```yaml
-  fallbacks: {}
-  ```
-  ```bash
-  ghprobe install -c my.yaml
-  ```
+```yaml
+fallbacks: {}
+```
 
-去掉之后，工具就**完全只用 GitHub 官方域名**。代价是：一旦 `raw.githubusercontent.com` 被 SNI 层封锁，这一类文件将没有任何替代入口（这属于该网络环境的客观限制，不是工具能绕过的）。
+```bash
+ghprobe install -c my.yaml
+```
+
+代价：`raw.githubusercontent.com` 被 SNI 封锁后，这类文件没有替代入口。
 
 ---
 
