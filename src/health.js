@@ -56,8 +56,12 @@ export function decide(probeResults, current, cfg) {
   const failed = new Set(probeResults.filter((r) => !r.ok).map((r) => r.domain));
   const total = current.entries.size;
 
-  if (total > 1 && failed.size * 2 > total) {
-    return { action: "none", reason: "多数域名同时失败，疑似网络故障" };
+  // 只有「已写入条目全部失败」才可能是网络级故障（黑洞窗口），此时本轮不动、避开窗口。
+  // 只要还有任意一条健康，就说明链路是通的，失败的那些是 IP 陈旧/真死，应当重排换 IP。
+  // 🔴 旧判据 `failed.size * 2 > total`（多数失败即放弃）已证实会误触发：分母只数已写入
+  //    条目、常低到 3~4，实测「3 条陈旧 + 1 条健康」被误判成断网 → 该修的时候不修。
+  if (total >= 2 && failed.size === total) {
+    return { action: "none", reason: "全部已写入 IP 同时失败，疑似网络故障" };
   }
 
   const cooldownMs = (cfg.schedule?.absentCooldownHours ?? 1) * 3600_000;

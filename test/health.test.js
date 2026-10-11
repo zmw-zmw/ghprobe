@@ -58,14 +58,64 @@ test("decide: 单域名失败 -> full（有健康参照，是 IP 死不是断网
   assert.deepEqual(d.domains, ["github.com"]);
 });
 
-test("decide: 多数失败 -> none（疑似网络故障，避开黑洞窗口）", () => {
-  const current = { entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "2.2.2.2"], ["avatars.githubusercontent.com", "3.3.3.3"]]), absent: new Map() };
+const fourCfg = {
+  domains: ["github.com", "codeload.github.com", "avatars.githubusercontent.com", "objects.githubusercontent.com"],
+  schedule: { absentCooldownHours: 1 },
+};
+
+test("decide: 全部已写入 IP 失败 -> none（疑似网络故障，避开黑洞窗口）", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "2.2.2.2"], ["avatars.githubusercontent.com", "3.3.3.3"]]),
+    absent: new Map(),
+  };
   const d = decide([
     { domain: "github.com", ok: false },
     { domain: "codeload.github.com", ok: false },
-    { domain: "avatars.githubusercontent.com", ok: true },
+    { domain: "avatars.githubusercontent.com", ok: false },
   ], current, cfg);
   assert.equal(d.action, "none");
+});
+
+// 回归用例：旧判据 `failed.size * 2 > total` 只要「多数失败」就放弃，
+// 实测会把「3 条陈旧 + 1 条健康」误判成断网 → 该修的时候不修。
+test("decide: 多数失败但仍有健康项 -> full（链路通，是 IP 陈旧，必须重排）", () => {
+  const current = {
+    entries: new Map([
+      ["github.com", "1.1.1.1"],
+      ["codeload.github.com", "2.2.2.2"],
+      ["avatars.githubusercontent.com", "3.3.3.3"],
+      ["objects.githubusercontent.com", "4.4.4.4"],
+    ]),
+    absent: new Map(),
+  };
+  const d = decide([
+    { domain: "github.com", ok: false },
+    { domain: "codeload.github.com", ok: true },
+    { domain: "avatars.githubusercontent.com", ok: false },
+    { domain: "objects.githubusercontent.com", ok: false },
+  ], current, fourCfg);
+  assert.equal(d.action, "full");
+  assert.deepEqual(
+    [...d.domains].sort(),
+    ["avatars.githubusercontent.com", "github.com", "objects.githubusercontent.com"],
+  );
+});
+
+test("decide: 2 条全失败 -> none（≥2 条全灭才判网络故障）", () => {
+  const twoCfg = { domains: ["github.com", "codeload.github.com"], schedule: { absentCooldownHours: 1 } };
+  const current = { entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "2.2.2.2"]]), absent: new Map() };
+  const d = decide([
+    { domain: "github.com", ok: false },
+    { domain: "codeload.github.com", ok: false },
+  ], current, twoCfg);
+  assert.equal(d.action, "none");
+});
+
+test("decide: 只有 1 条且失败 -> full（无横向参照，倾向重排）", () => {
+  const oneCfg = { domains: ["github.com"], schedule: { absentCooldownHours: 1 } };
+  const current = { entries: new Map([["github.com", "1.1.1.1"]]), absent: new Map() };
+  const d = decide([{ domain: "github.com", ok: false }], current, oneCfg);
+  assert.equal(d.action, "full");
 });
 
 test("decide: 缺失域名非冷却 -> full", () => {

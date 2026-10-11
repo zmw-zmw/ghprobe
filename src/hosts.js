@@ -74,27 +74,50 @@ export function mergeHosts(current, block) {
   return merged.endsWith("\n") ? merged : merged + "\n";
 }
 
-// 写临时 ps1 -> 弹 UAC 提权执行 -> 取回被提升进程 ExitCode -> 清理 ps1（apply/restore/install 复用）
-export async function runElevated(content) {
-  const tmp = path.join(os.tmpdir(), `ghprobe-${Date.now()}.ps1`);
-  fs.writeFileSync(tmp, content, "utf8");
+// 构造提权包装命令：Start-Process -Verb RunAs 拉起目标，并把被提升进程的退出码带回来。
+// 两个关键点（都踩过）：
+// ① 先把控制台输出编码设为 UTF-8 —— 否则 PowerShell 以 GBK 写 stderr，Node 按 UTF-8 解码会乱码，
+//    调用方 throw 出来的「提权写入失败: …」就变成一串问号。
+// ② 必须在 `exit $p.ExitCode` 之前判空：Start-Process 自身失败（典型是用户取消 UAC）时
+//    抛的是「非终止错误」，脚本会继续往下执行，$p 仍为 $null，而 `exit $null` 等价于
+//    退出码 0 —— 会把「提权失败」伪装成「成功」。-ErrorAction Stop 让它变成可捕获的终止错误。
+export function buildElevateCommand(file, args = []) {
+  const list = args.map((a) => `'${a}'`).join(",");
+  return `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {};`
+    + ` try { $p = Start-Process -FilePath '${file}' -Verb RunAs -Wait -PassThru -ArgumentList ${list} -ErrorAction Stop }`
+    + ` catch { [Console]::Error.WriteLine('提权失败: ' + $_.Exception.Message); exit 1 };`
+    + ` if ($null -eq $p) { exit 1 };`
+    + ` exit $p.ExitCode`;
+}
+
+// 跑一段 PowerShell 命令，回传 { code, out, err }
+function runPowerShellCommand(cmd) {
   return new Promise((resolve, reject) => {
-    // 用 Start-Process -Verb RunAs 弹 UAC 提权，-PassThru -Wait 取回被提升进程 ExitCode
-    const cmd = `$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${tmp}'; exit $p.ExitCode`;
     const child = execFile("powershell", ["-NoProfile", "-Command", cmd], { windowsVerbatimArguments: true });
     let out = "";
     let err = "";
     child.stdout?.on("data", (d) => { out += d; });
     child.stderr?.on("data", (d) => { err += d; });
-    child.on("close", (code) => {
-      try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
-      resolve({ code, out, err });
-    });
-    child.on("error", (e) => {
-      try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
-      reject(e);
-    });
+    child.on("close", (code) => resolve({ code, out, err }));
+    child.on("error", reject);
   });
+}
+
+// 跑一次提权包装。单独导出是为了让回归测试能注入一个必然失败的 Start-Process 目标，
+// 从而验证「提权失败不会退化成退出码 0」。
+export function runElevationWrapper(file, args = []) {
+  return runPowerShellCommand(buildElevateCommand(file, args));
+}
+
+// 写临时 ps1 -> 弹 UAC 提权执行 -> 取回被提升进程 ExitCode -> 清理 ps1（apply/restore/install 复用）
+export async function runElevated(content) {
+  const tmp = path.join(os.tmpdir(), `ghprobe-${Date.now()}.ps1`);
+  fs.writeFileSync(tmp, content, "utf8");
+  try {
+    return await runElevationWrapper("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp]);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
+  }
 }
 
 // 事务化提权写入：备份 -> 覆盖 -> 校验含 BEGIN -> 失败回滚 -> 刷 DNS 缓存
