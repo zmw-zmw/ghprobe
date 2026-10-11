@@ -7,7 +7,7 @@
 // GET  /api/config  当前生效配置
 import http from "node:http";
 import { runProbe } from "./probe.js";
-import { buildBlock } from "./hosts.js";
+import { blockFromProbeResult } from "./health.js";
 
 const state = { results: null, block: "", at: null, probing: false };
 
@@ -21,7 +21,7 @@ export async function probeNow(cfg, log, run = runProbe) {
     const r = await run(cfg, log);
     state.results = r;
     state.at = r.at;
-    state.block = buildBlock(r.ranked, r.extra);
+    state.block = blockFromProbeResult(cfg, r);
     return r;
   } finally {
     state.probing = false;

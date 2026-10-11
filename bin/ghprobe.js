@@ -5,12 +5,11 @@
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 import { Command } from "commander";
 import { loadConfig } from "../src/config.js";
 import { probeNow, startServer } from "../src/server.js";
-import { runHealth } from "../src/health.js";
-import { buildBlock, mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated } from "../src/hosts.js";
+import { runHealth, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
+import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -55,10 +54,15 @@ program.command("probe")
         console.error("另一进程正在写 hosts，本轮跳过（下轮健康检查会自动补写）");
       } else {
         try {
-          const block = buildBlock(r.ranked, r.extra);
-          const merged = mergeHosts(readFileSync(WIN_HOSTS, "utf8"), block);
-          const res = await applyHosts(merged);
-          console.log(`hosts 已写入，备份在 ${res.backup}`);
+          const current = readFileSync(WIN_HOSTS, "utf8");
+          // 块格式与 health 保持一致（含 # absent 冷却），并走同一道全灭护栏
+          const block = blockFromProbeResult(cfg, r);
+          if (shouldKeepOldBlock(current, block)) {
+            console.error("本轮全部域名不可达（疑似网络故障），保留 hosts 中的旧条目不动");
+          } else {
+            const res = await applyHosts(mergeHosts(current, block));
+            console.log(`hosts 已写入，备份在 ${res.backup}`);
+          }
         } finally { releaseHostsLock(lock); }
       }
     }
@@ -80,7 +84,7 @@ program.command("hosts")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
     const r = await probeNow(cfg, (m) => console.error(m));
-    console.log(buildBlock(r.ranked, r.extra));
+    console.log(blockFromProbeResult(cfg, r));
   });
 
 program.command("health")
@@ -120,12 +124,24 @@ program.command("install")
 program.command("uninstall")
   .description("删除 ghprobe 计划任务并还原 hosts")
   .action(async () => {
-    // 先还原 hosts，再删计划任务；删任务失败也不影响 hosts 回滚
-    await restoreHosts();
-    console.log("hosts 已还原");
-    const p = spawnSync("powershell", ["-NoProfile", "-Command", "Unregister-ScheduledTask -TaskName ghprobe -Confirm:$false"], { encoding: "utf8" });
-    if (p.status === 0) { console.log("计划任务 ghprobe 已删除"); }
-    else { console.error(`删除计划任务失败（可能不存在）: ${p.stderr || p.stdout}`); }
+    // 两步互相独立：任一步失败都不影响另一步，最后统一置 exitCode
+    try {
+      await restoreHosts();
+      console.log("hosts 已还原");
+    } catch (e) {
+      console.error(`还原 hosts 失败: ${e.message}`);
+      process.exitCode = 1;
+    }
+    // 删任务同样需要管理员权限：任务建在根目录且 RunLevel=Highest，非提权删会「拒绝访问」，
+    // 因此这里和 install 一样走 runElevated 自提权（已提权时会话内直接执行，不再弹 UAC）。
+    try {
+      const r = await runElevated(buildUninstallTaskScript());
+      if (r.code === 0) { console.log("计划任务 ghprobe 已删除（若本就不存在则跳过）"); }
+      else { console.error(`删除计划任务失败: ${r.err || r.out}`); process.exitCode = 1; }
+    } catch (e) {
+      console.error(`删除计划任务失败: ${e.message}`);
+      process.exitCode = 1;
+    }
   });
 
 program.parseAsync();

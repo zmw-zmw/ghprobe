@@ -90,6 +90,20 @@ export function buildElevateCommand(file, args = []) {
     + ` exit $p.ExitCode`;
 }
 
+// 构造「删除计划任务」的提权脚本。单独导出是为了可单测、可独立执行验证。
+// 两个关键点：
+// ① 任务不存在时直接 exit 0（幂等）—— uninstall 重复跑不应报错。
+// ② 删除动作必须 -ErrorAction Stop：否则「拒绝访问」这类错误是非终止的，脚本会继续走到
+//    末尾的 exit 0，把「删除失败」伪装成「成功」。
+export function buildUninstallTaskScript(taskName = "ghprobe") {
+  return `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {};`
+    + ` if (-not (Get-ScheduledTask -TaskName '${taskName}' -ErrorAction SilentlyContinue))`
+    + ` { [Console]::Error.WriteLine('计划任务 ${taskName} 不存在，跳过'); exit 0 };`
+    + ` try { Unregister-ScheduledTask -TaskName '${taskName}' -Confirm:$false -ErrorAction Stop }`
+    + ` catch { [Console]::Error.WriteLine('删除计划任务失败: ' + $_.Exception.Message); exit 1 };`
+    + ` exit 0`;
+}
+
 // 跑一段 PowerShell 命令，回传 { code, out, err }
 function runPowerShellCommand(cmd) {
   return new Promise((resolve, reject) => {
@@ -109,10 +123,18 @@ export function runElevationWrapper(file, args = []) {
   return runPowerShellCommand(buildElevateCommand(file, args));
 }
 
+// 写提权脚本文件。🔴 必须带 UTF-8 BOM：PowerShell 5.1 对「无 BOM 的 .ps1」按系统 ANSI
+// 代码页（中文系统 = GBK）解析，脚本里的中文字面量（错误提示）会整段变乱码。
+// 加 BOM 后 PS 才按 UTF-8 解析。注意这条路径与 buildElevateCommand 不同 ——
+// 那条走 `-Command`，参数由 CreateProcessW 以 UTF-16 传递，本来就不受文件编码影响。
+export function writePs1WithBom(file, content) {
+  fs.writeFileSync(file, "\ufeff" + content, "utf8");
+}
+
 // 写临时 ps1 -> 弹 UAC 提权执行 -> 取回被提升进程 ExitCode -> 清理 ps1（apply/restore/install 复用）
 export async function runElevated(content) {
   const tmp = path.join(os.tmpdir(), `ghprobe-${Date.now()}.ps1`);
-  fs.writeFileSync(tmp, content, "utf8");
+  writePs1WithBom(tmp, content);
   try {
     return await runElevationWrapper("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp]);
   } finally {
@@ -126,6 +148,7 @@ export async function applyHosts(merged, hostsPath = WIN_HOSTS) {
   fs.writeFileSync(tmp, merged, "utf8");
   const bak = `${hostsPath}.ghprobe-bak`;
   const script = `
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
 $tmp = '${tmp}'
 $bak = '${bak}'
@@ -136,14 +159,14 @@ try {
   $now = Get-Content $src -Raw -ErrorAction Stop
   if ($now -notmatch [regex]::Escape($marker)) {
     Copy-Item -Force $bak $src
-    Write-Error 'hosts 校验失败：未找到 ghprobe 标记，已回滚'
+    [Console]::Error.WriteLine('hosts 校验失败：未找到 ghprobe 标记，已回滚')
     exit 1
   }
   ipconfig /flushdns | Out-Null
   exit 0
 } catch {
   if (Test-Path $bak) { Copy-Item -Force $bak $src }
-  Write-Error $_
+  [Console]::Error.WriteLine('hosts 写入失败: ' + $_.Exception.Message)
   exit 1
 }
 `;
@@ -160,6 +183,7 @@ try {
 export async function restoreHosts(hostsPath = WIN_HOSTS) {
   const bak = `${hostsPath}.ghprobe-bak`;
   const script = `
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
 $bak = '${bak}'
 try {
@@ -173,7 +197,7 @@ try {
   ipconfig /flushdns | Out-Null
   exit 0
 } catch {
-  Write-Error $_
+  [Console]::Error.WriteLine('hosts 还原失败: ' + $_.Exception.Message)
   exit 1
 }
 `;

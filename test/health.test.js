@@ -3,7 +3,7 @@
 // 调度层离线单测：解析/序列化/决策/部分更新/全灭护栏（不联网、不写系统文件）
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseBlock, buildHealthBlock, decide, applyDelta, targetDomains } from "../src/health.js";
+import { parseBlock, buildHealthBlock, decide, applyDelta, targetDomains, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
 
 const cfg = {
   domains: ["github.com", "codeload.github.com", "raw.githubusercontent.com"],
@@ -221,4 +221,33 @@ test("applyDelta: 兜底域名探到活 IP -> 补写进 entries", () => {
   const d = applyDelta(current, new Map(), extra, ["cdn.jsdelivr.net"], fbCfg);
   assert.equal(d.entries.get("cdn.jsdelivr.net"), "104.16.0.1");
   assert.deepEqual(d.changed, ["cdn.jsdelivr.net"]);
+});
+
+// ── 两条写入路径块格式统一 + 全灭护栏 ────────────────────────────────
+test("blockFromProbeResult: 无活 IP 的目标域名记入 # absent 冷却（与 health 块同构）", () => {
+  const p = parseBlock(blockFromProbeResult(fbCfg, {
+    ranked: new Map([["github.com", [{ ip: "20.205.243.166" }]], ["raw.githubusercontent.com", []]]),
+    extra: new Map([["cdn.jsdelivr.net", [{ ip: "104.16.0.1" }]]]),
+  }));
+  assert.equal(p.entries.get("github.com"), "20.205.243.166");
+  assert.equal(p.entries.get("cdn.jsdelivr.net"), "104.16.0.1");
+  assert.equal(p.entries.has("raw.githubusercontent.com"), false);
+  assert.ok(p.absent.has("raw.githubusercontent.com"), "无活 IP 的目标域名应记入 absent 冷却，否则下次 health 白跑全量");
+});
+
+test("shouldKeepOldBlock: 新块全灭而旧块有条目 -> 拒绝写入（全灭护栏）", () => {
+  const oldContent = buildHealthBlock(new Map([["github.com", "1.1.1.1"]]), new Map());
+  const emptyBlock = buildHealthBlock(new Map(), new Map([["github.com", "2026-10-11T00:00:00.000Z"]]));
+  assert.equal(shouldKeepOldBlock(oldContent, emptyBlock), true);
+});
+
+test("shouldKeepOldBlock: 旧块本来就没有条目 -> 允许写入", () => {
+  const emptyBlock = buildHealthBlock(new Map(), new Map([["github.com", "2026-10-11T00:00:00.000Z"]]));
+  assert.equal(shouldKeepOldBlock("127.0.0.1 localhost\n", emptyBlock), false);
+});
+
+test("shouldKeepOldBlock: 新块有活 IP -> 允许写入", () => {
+  const oldContent = buildHealthBlock(new Map([["github.com", "1.1.1.1"]]), new Map());
+  const newBlock = buildHealthBlock(new Map([["github.com", "2.2.2.2"]]), new Map());
+  assert.equal(shouldKeepOldBlock(oldContent, newBlock), false);
 });

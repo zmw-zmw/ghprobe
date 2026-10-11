@@ -49,6 +49,25 @@ export function targetDomains(cfg) {
   return [...new Set([...(cfg.domains || []), ...fb])];
 }
 
+// 由一轮探测结果生成待写入的块。
+// 与 health 写出的块保持同构：没有活 IP 的目标域名记入 `# absent` 冷却注释，
+// 否则下次 health 会把这些域名当「缺失」而白跑一次全量。
+export function blockFromProbeResult(cfg, r) {
+  const entries = new Map();
+  for (const [d, rs] of r.ranked || []) { if (rs.length) { entries.set(d, rs[0].ip); } }
+  for (const [d, rs] of r.extra || []) { if (rs.length) { entries.set(d, rs[0].ip); } }
+  const absent = new Map();
+  const now = new Date().toISOString();
+  for (const d of targetDomains(cfg)) { if (!entries.has(d)) { absent.set(d, now); } }
+  return buildHealthBlock(entries, absent);
+}
+
+// 全灭护栏（写入前判定）：新块一条有效 IP 都没有、而 hosts 里还有旧条目时，必须拒绝写入 ——
+// 否则会把原本可用的条目一起抹掉（`probe --apply` 此前缺这道护栏，只有 health 有）。
+export function shouldKeepOldBlock(oldContent, newBlock) {
+  return parseBlock(newBlock).entries.size === 0 && parseBlock(oldContent).entries.size > 0;
+}
+
 // 决策（纯函数）：输入已写入 IP 的探活结果 + 当前块状态，输出动作
 // 横向判据：严格多数条目同时失败视为网络故障（本轮不动，避开黑洞窗口）；
 // 单条目失败或缺失域名（非冷却）才触发全量重排
