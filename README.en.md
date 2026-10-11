@@ -565,6 +565,22 @@ Two by default (`hosts.maxEntriesPerDomain`): the best IP plus one spare. Window
 **Q: What if an IP dies between two health checks?**
 The client falls through to the spare entry, so the cost is one extra connect timeout rather than a hard failure. Without a spare, the worst-case interruption would be about `schedule.healthMin` (1 minute by default).
 
+**Q: How do I upgrade?**
+```powershell
+npm install -g ghprobe@latest
+```
+The scheduled task runs a **fixed path** inside the npm global directory, and `npm install -g` replaces it in place — so the **next trigger (within a minute) picks up the new version**. No need to re-run `install`, no second UAC prompt.
+
+**Does the config update too?** Yes. At `install` time a **snapshot** of the then-current default config is stored, and loading does a **three-way merge**:
+
+- Keys you **never changed** (value still equals the snapshot) → follow the latest default
+- Keys you **did change** → your value is kept
+- Keys you added / keys newly added by a release → both kept
+
+So improvements to defaults (say, new fallback candidates) reach you **automatically**, and your customisations are never overwritten. To see what differs: `ghprobe config-diff`.
+
+> Note: users who installed before 0.1.2 have no snapshot; it is created on the next `ghprobe install`. Until then, use `ghprobe config-diff` and delete the keys you want to follow.
+
 **Q: Does the scheduled task run while the screen is locked?**
 The task registered by `install` uses `LogonType = Interactive`, so it won't fire while locked / logged off / not logged in; it resumes on the interval after logon.
 

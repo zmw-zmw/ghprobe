@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { loadConfig, ensureUserConfig, userConfigPath } from "../src/config.js";
+import { loadConfig, ensureUserConfig, userConfigPath, userConfigSnapshotPath, configDiff } from "../src/config.js";
 import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
 import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
@@ -273,10 +273,33 @@ program.command("update-pool")
   });
 
 program.command("config-path")
-  .description("打印用户配置文件与池缓存的路径（配置文件可直接编辑）")
+  .description("打印用户配置文件、默认配置快照与池缓存的路径（配置文件可直接编辑）")
   .action(() => {
     console.log(`配置：${userConfigPath()}`);
+    console.log(`快照：${userConfigSnapshotPath()}（安装时的默认配置，用来判断你改过哪些键）`);
     console.log(`池缓存：${poolCachePath()}`);
+  });
+
+program.command("config-diff")
+  .description("对比用户配置与当前默认配置（升级后看哪些默认改动还没生效）")
+  .action(() => {
+    const { hasUser, diff } = configDiff();
+    if (!hasUser) {
+      console.log("还没有用户配置 —— 先跑一次 `ghprobe install` 生成。");
+      return;
+    }
+    if (!diff.length) {
+      console.log("用户配置与当前默认一致，没有需要处理的差异。");
+      return;
+    }
+    console.log(`用户配置与当前默认有 ${diff.length} 处差异：\n`);
+    for (const d of diff) {
+      console.log(`  ${d.key}`);
+      console.log(`    你的值   : ${JSON.stringify(d.user)}`);
+      console.log(`    当前默认 : ${JSON.stringify(d.def)}`);
+    }
+    console.log("\n想让某处跟随新默认：把用户配置里对应的键**删掉**即可（没被改过的键会自动跟随默认）。");
+    console.log(`配置文件：${userConfigPath()}`);
   });
 
 program.parseAsync();

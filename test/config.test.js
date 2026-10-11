@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, userConfigPath, ensureUserConfig, normalizeFallbacks } from "../src/config.js";
+import { loadConfig, userConfigPath, ensureUserConfig, normalizeFallbacks, mergeThreeWay, deepEqual, userConfigSnapshotPath } from "../src/config.js";
 
 function withUserYaml(body, fn) {
   const tmp = path.join(os.tmpdir(), `ghprobe-config-test-${Date.now()}.yaml`);
@@ -120,4 +120,107 @@ test("loadConfig: 默认配置的 raw 兜底有多个候选且带判据", () => 
   // 代理型替身自带判据
   assert.ok(cfg.fallbackSigs["ghproxy.net"], "代理型替身必须自带 path/mustContain");
   assert.ok(cfg.fallbackSigs["ghproxy.net"].path.startsWith("/https://"));
+});
+
+// ============================================================================
+// 2026-10-11 新增：三方合并 —— 让「默认值的改进」能到达老用户
+// 问题：用户配置是 install 时整份复制的，且优先于包内默认 -> 默认里**已有键**的新值永远到不了老用户。
+// 解法：install 时存一份默认快照；用户值 == 快照值 => 这个键他没动过 => 用新默认。
+// ============================================================================
+
+test("deepEqual: 数组看元素顺序，对象不看键顺序", () => {
+  assert.equal(deepEqual([1, 2], [1, 2]), true);
+  assert.equal(deepEqual([1, 2], [2, 1]), false);
+  assert.equal(deepEqual({ a: 1, b: 2 }, { b: 2, a: 1 }), true);
+  assert.equal(deepEqual({ a: [1] }, { a: [1] }), true);
+  assert.equal(deepEqual({ a: 1 }, { a: 1, b: 2 }), false);
+  assert.equal(deepEqual(1, "1"), false);
+  assert.equal(deepEqual(null, undefined), false);
+});
+
+test("mergeThreeWay: 没有快照 -> 退回「用户值优先」（不敢猜）", () => {
+  const def = { a: 1, b: 2 };
+  const user = { a: 9 };
+  assert.deepEqual(mergeThreeWay(def, user, null), { a: 9, b: 2 });
+});
+
+test("mergeThreeWay: 用户值 == 快照值 -> 用新默认（关键用例）", () => {
+  // 用户没动过 fallbacks；默认里给它加了两个候选 -> 老用户应该拿到
+  const snap = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net"] } };
+  const user = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net"] } };
+  const def = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net", "ghproxy.net", "gh-proxy.com"] } };
+  const out = mergeThreeWay(def, user, snap);
+  assert.deepEqual(out.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "ghproxy.net", "gh-proxy.com"]);
+});
+
+test("mergeThreeWay: 用户值 != 快照值 -> 保留用户值（不覆盖自定义）", () => {
+  const snap = { schedule: { healthMin: 1 } };
+  const user = { schedule: { healthMin: 5 } };   // 用户改过
+  const def = { schedule: { healthMin: 1, absentCooldownHours: 1 } };
+  const out = mergeThreeWay(def, user, snap);
+  assert.equal(out.schedule.healthMin, 5, "用户改过的值必须保留");
+  assert.equal(out.schedule.absentCooldownHours, 1, "新键仍要从默认带进来");
+});
+
+test("mergeThreeWay: 用户自己加的键保留；默认里的新键带上", () => {
+  const snap = { a: 1 };
+  const user = { a: 1, myOwn: "keep-me" };
+  const def = { a: 1, brandNew: "from-default" };
+  const out = mergeThreeWay(def, user, snap);
+  assert.equal(out.myOwn, "keep-me");
+  assert.equal(out.brandNew, "from-default");
+});
+
+test("mergeThreeWay: 嵌套对象逐层判断（一层没改、一层改了）", () => {
+  const snap = { timeouts: { tcpMs: 2500, tlsMs: 6000 } };
+  const user = { timeouts: { tcpMs: 2500, tlsMs: 3000 } };  // 只改了 tlsMs
+  const def = { timeouts: { tcpMs: 1500, tlsMs: 6000 } };   // 默认改了 tcpMs
+  const out = mergeThreeWay(def, user, snap);
+  assert.equal(out.timeouts.tcpMs, 1500, "没改过的键跟随新默认");
+  assert.equal(out.timeouts.tlsMs, 3000, "改过的键保留用户值");
+});
+
+test("ensureUserConfig: 首次生成用户配置时同时写快照；二次调用不覆盖两者", () => {
+  const orig = process.env.LOCALAPPDATA;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ghprobe-snap-"));
+  process.env.LOCALAPPDATA = tmp;
+  try {
+    const p = userConfigPath();
+    const sp = userConfigSnapshotPath();
+    assert.equal(fs.existsSync(p), false);
+    ensureUserConfig();
+    assert.equal(fs.existsSync(p), true, "应生成用户配置");
+    assert.equal(fs.existsSync(sp), true, "应同时生成快照");
+
+    // 用户改了配置；再 install 不能覆盖用户配置，也不能刷新快照（基准不能漂）
+    fs.writeFileSync(p, "domains: [github.com]\n", "utf8");
+    fs.writeFileSync(sp, "# user-marker\n", "utf8");
+    ensureUserConfig();
+    assert.match(fs.readFileSync(p, "utf8"), /domains: \[github\.com\]/);
+    assert.match(fs.readFileSync(sp, "utf8"), /user-marker/);
+  } finally {
+    process.env.LOCALAPPDATA = orig;
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  }
+});
+
+test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）", () => {
+  const orig = process.env.LOCALAPPDATA;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ghprobe-3way-"));
+  process.env.LOCALAPPDATA = tmp;
+  try {
+    // 快照 = 默认（模拟 install），用户配置 = 默认 + 一处自定义
+    ensureUserConfig();
+    const p = userConfigPath();
+    const user = fs.readFileSync(p, "utf8").replace(/healthMin: 1/, "healthMin: 9");
+    fs.writeFileSync(p, user, "utf8");
+
+    const cfg = loadConfig();
+    assert.equal(cfg.schedule.healthMin, 9, "用户改过的键保留");
+    // 没改过的键（兜底候选）应跟随当前默认
+    assert.ok(cfg.fallbacks["raw.githubusercontent.com"].length >= 2);
+  } finally {
+    process.env.LOCALAPPDATA = orig;
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  }
 });
