@@ -28,6 +28,23 @@
 
 ### Added
 
+- **候选池每天自动跟随官方网段**（`poolUpdate`）：从 GitHub 官方 `api.github.com/meta` 拉最新
+  网段，展开成候选 IP 缓存到 `%LOCALAPPDATA%\ghprobe\pool.cache.json`，供 `auto` 池使用。
+  实测内置的 24 个 Azure IP 里已有 4 个不在官方 web 段，静态池注定过期。
+  两个关键约束：① 拉 meta 必须**种子 IP 直连 + SNI**（`api.github.com` 的 DNS 在国内被污染，
+  而这一步恰恰发生在「还没有可用 IP」时）；② 该 API 未认证限 **60 次/小时**，所以
+  **成功与失败共用同一档冷却**（`intervalHours`，默认 24h）—— 被 SNI 封锁时反复重试毫无意义，
+  还会白撞限流。新增 `ghprobe update-pool` 手动触发（不受周期限制）
+- **本地网络检查**（`networkCheck`）：每轮先查 ① 有没有启用的非回环网卡、② TCP 连一下国内
+  基准目标（默认 `223.5.5.5:443`）。本机断网时**不探测、不更新池、不写 hosts**，只记一条
+  `action=skip reason=本地无网络连接`。理由：断网时所有候选必然全灭，跑一轮纯属浪费，日志还会被
+  「stuck / 全灭」刷屏，把「本机没网」和「GitHub 被墙」混在一起反而看不出真故障。基准目标
+  刻意不是 GitHub —— 它只判断「本机能不能出去」。`install` 在断网时同样跳过探测，但**照常注册
+  计划任务**，有网后自动生效
+- **用户可编辑的外部配置文件**：`install` 时把包内默认配置复制到
+  `%LOCALAPPDATA%\ghprobe\config.yaml`（已存在则不覆盖），用户可直接编辑候选池 / 超时 /
+  调度间隔 / 本地网络检查等。放用户目录而非包目录：npm 升级/重装会整个换掉 `node_modules`。
+  优先级 `-c 指定` > 用户目录 > 包内默认。新增 `ghprobe config-path` 打印两个路径
 - **同名多条目 + 客户端自动 fallback**（`hosts.maxEntriesPerDomain`，默认 2）：每个域名写
   「最优 IP + 1 条备选」。实测推翻旧假设「Windows 同一域名只取第一条」—— hosts 里同名多条会被
   解析器**全部返回**（保持文件顺序），curl / 浏览器会**逐个尝试**：黑洞 IP 排在前也能 fallback
@@ -37,6 +54,13 @@
   （`stuck=github.com`）。此前只记 `action=none reason=无变化`，在黑洞窗口里会让人误以为工具没干活
 - 已提权时跳过提权包装（`isElevated()`）：计划任务本身就以最高权限运行，原先
   `applyHosts` 还会再走一次 `Start-Process -Verb RunAs`，多拉一个控制台窗口，是无窗口运行的第二个破口
+
+### Changed
+
+- **拉 meta 的种子改为「首个成功即返回」**：原先串行试种子，黑洞窗口里要一个个等超时
+  （实测 2m13s）；改 `Promise.allSettled` 并行后降到 8.2s —— 但它要等**最慢**那个（正好一个
+  `timeoutMs`），等于没真正并行。最终改为并行 + 第一个成功立刻返回并**掐掉其余在飞请求**，
+  实测 **0.84s**，且进程立即退出（落败请求已销毁，不会挂着 event loop）
 
 ### Fixed
 

@@ -7,7 +7,9 @@ import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, ensureUserConfig, userConfigPath } from "../src/config.js";
+import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
+import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
 import { runHealth, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
 import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
@@ -24,6 +26,23 @@ function healthLogPath() {
 // 无窗口运行包装器（VBScript）的落地路径。计划任务跑的是它，不是 node 本体。
 function hiddenRunnerPath() {
   return path.join(userDataDir(), "run-hidden.vbs");
+}
+
+// 计划任务静默运行，stdout/stderr 都丢；每轮结果追加日志文件，跑挂了能查到。
+// stuck 单独记：它表示「探测跑了、但这个域名本轮一个活 IP 都没找到，只能保留旧值」——
+// 只看 action=none 会误以为工具没干活，其实可能是链路整体被黑洞了。
+function writeHealthLog(action, reason, extra = {}) {
+  const entry = `${new Date().toISOString()} health action=${action} reason=${reason}`
+    + `${extra.changed && extra.changed.length ? ` changed=${extra.changed.join(",")}` : ""}`
+    + `${extra.stuck && extra.stuck.length ? ` stuck=${extra.stuck.join(",")}` : ""}\n`;
+  try {
+    const f = healthLogPath();
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    // 新文件写 UTF-8 BOM：否则 PowerShell 5.1 的 Get-Content 会按系统 ANSI 解码，
+    // 中文日志在用户查看时变乱码（文件本身没错，是读取端猜错编码）。
+    const prefix = fs.existsSync(f) ? "" : "\ufeff";
+    fs.appendFileSync(f, prefix + entry);
+  } catch { /* 日志写失败不影响主流程 */ }
 }
 
 // 打印 hosts 块里的 IP 条目（install 完成后回显写入结果）
@@ -62,6 +81,11 @@ program.command("probe")
   .option("-a, --apply", "探测后写入系统 hosts（会弹 UAC）")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
+    if (!(await hasLocalNetwork(cfg))) {
+      console.error("本地无网络连接，跳过探测（不写 hosts）");
+      process.exitCode = 1;
+      return;
+    }
     const r = await probeNow(cfg, (m) => { if (!opts.json) { console.error(m); } });
     if (opts.json) {
       const out = { at: r.at, domains: [...r.ranked].map(([d, rs]) => ({ domain: d, alive: rs.map((x) => ({ ip: x.ip, tcpMs: x.tcpMs, tlsMs: x.tlsMs, ttfb: x.ttfb, score: x.score })) })), extra: [...r.extra].map(([d, rs]) => ({ domain: d, alive: rs.map((x) => x.ip) })) };
@@ -113,22 +137,25 @@ program.command("health")
   .option("-c, --config <path>", "用户配置覆盖")
   .option("-a, --apply", "检测到异常时写入系统 hosts（会弹 UAC）")
   .action(async (opts) => {
-    const cfg = loadConfig(opts.config);
+    let cfg = loadConfig(opts.config);
+    // 本地断网 -> 直接跳过：所有候选必然全灭，跑一轮只会刷屏并把真故障淹掉。
+    if (!(await hasLocalNetwork(cfg))) {
+      console.error("本地无网络连接，跳过本轮（不探测、不更新池、不写 hosts）");
+      writeHealthLog("skip", "本地无网络连接");
+      return;
+    }
+    // 到点先更新候选池（默认每天 1 次；成功失败同一档冷却，不会反复重试）。
+    // 放最前：池子新了，后面的重排才有更宽的候选可用；更新成功后重新加载配置以吃进新池。
+    if (poolNeedsUpdate(cfg)) {
+      try {
+        await updatePool(cfg, (m) => console.error(m));
+        cfg = loadConfig(opts.config);
+      } catch (e) {
+        console.error(`候选池更新失败（忽略，用现有池继续）: ${e.message}`);
+      }
+    }
     const r = await runHealth(cfg, (m) => console.error(m), Boolean(opts.apply));
-    // 计划任务静默运行，stdout/stderr 都丢；每轮结果追加日志文件，跑挂了能查到。
-    // stuck 单独记：它表示「探测跑了、但这个域名本轮一个活 IP 都没找到，只能保留旧值」——
-    // 只看 action=none 会误以为工具没干活，其实可能是链路整体被黑洞了。
-    const entry = `${new Date().toISOString()} health action=${r.action} reason=${r.reason}`
-      + `${r.changed && r.changed.length ? ` changed=${r.changed.join(",")}` : ""}`
-      + `${r.stuck && r.stuck.length ? ` stuck=${r.stuck.join(",")}` : ""}\n`;
-    try {
-      const f = healthLogPath();
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      // 新文件写 UTF-8 BOM：否则 PowerShell 5.1 的 Get-Content 会按系统 ANSI 解码，
-      // 中文日志在用户查看时变乱码（文件本身没错，是读取端猜错编码）。
-      const prefix = fs.existsSync(f) ? "" : "\ufeff";
-      fs.appendFileSync(f, prefix + entry);
-    } catch { /* 日志写失败不影响主流程 */ }
+    writeHealthLog(r.action, r.reason, r);
   });
 
 program.command("install")
@@ -136,8 +163,16 @@ program.command("install")
   .option("-c, --config <path>", "用户配置覆盖（间隔取 schedule.healthMin 分钟）")
   .option("--skip-probe", "只注册计划任务，不立即探测写 hosts（等下一次定时触发）")
   .action(async (opts) => {
+    // 生成用户可编辑的配置文件（已存在则不覆盖，保留用户改动）
+    const ucfg = ensureUserConfig();
     const cfg = loadConfig(opts.config);
     const minutes = cfg.schedule?.healthMin ?? 1;
+    console.log(`用户配置：${ucfg}`);
+    console.log("（可直接编辑：候选池 / 超时 / 调度间隔都在里面，优先级高于包内默认）");
+    // 断网时不探测（必然全灭），但**仍然注册计划任务** —— 有网后任务会自动跑起来
+    const online = await hasLocalNetwork(cfg);
+    const skipProbe = Boolean(opts.skipProbe) || !online;
+    if (!online) { console.log("本地无网络连接：本次跳过探测写 hosts（计划任务仍会注册，有网后自动生效）"); }
     // 包内 bin 与当前 node 的绝对路径：npm 全局安装后二者都指向真实位置，
     // 不依赖计划任务进程的 PATH（highest runlevel 下 PATH 未必含 %APPDATA%\npm）。
     const bin = path.join(ROOT, "bin", "ghprobe.js");
@@ -217,6 +252,29 @@ program.command("uninstall")
     }
     // 包装器是 ghprobe 自己生成的临时产物，顺手清掉（删不掉也不影响，下次 install 会覆盖）
     try { fs.unlinkSync(hiddenRunnerPath()); } catch { /* 不存在就算了 */ }
+  });
+
+program.command("update-pool")
+  .description("从 GitHub 官方 api.github.com/meta 更新候选池缓存（每天一次即可，该 API 限 60 次/小时）")
+  .option("-c, --config <path>", "用户配置覆盖")
+  .action(async (opts) => {
+    const cfg = loadConfig(opts.config);
+    try {
+      const r = await updatePool(cfg, (m) => console.error(m));
+      console.log(`候选池已更新：${r.count} 个 IP`);
+      console.log(`  经 ${r.via} 拉取 -> ${r.path}`);
+      console.log("下次 probe / health 会自动使用 auto 池");
+    } catch (e) {
+      console.error(`更新失败: ${e.message}`);
+      process.exitCode = 1;
+    }
+  });
+
+program.command("config-path")
+  .description("打印用户配置文件与池缓存的路径（配置文件可直接编辑）")
+  .action(() => {
+    console.log(`配置：${userConfigPath()}`);
+    console.log(`池缓存：${poolCachePath()}`);
   });
 
 program.parseAsync();

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // config 合并单测：验证用户只覆盖子属性时不会清空默认兄弟属性
+import "./helpers.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, userConfigPath, ensureUserConfig } from "../src/config.js";
 
 function withUserYaml(body, fn) {
   const tmp = path.join(os.tmpdir(), `ghprobe-config-test-${Date.now()}.yaml`);
@@ -40,4 +41,33 @@ test("loadConfig: 用户覆盖 probe 子对象合并", () => {
   assert.equal(cfg.probe.concurrency, 1);
   assert.equal(cfg.probe.maxCandidates, 8);
   assert.equal(cfg.probe.maxPerDomain, 4);
+});
+
+// ── 用户配置文件：install 生成、用户可编辑、优先于包内默认 ──────────
+test("userConfigPath: 落在用户数据目录下（且被测试隔离到临时目录）", () => {
+  assert.ok(userConfigPath().endsWith(path.join("ghprobe", "config.yaml")));
+  assert.ok(userConfigPath().startsWith(process.env.GHPROBE_TEST_DATA_DIR), "测试必须隔离，否则会读到本机真实配置");
+});
+
+test("ensureUserConfig: 首次生成、二次不覆盖（保留用户改动）", () => {
+  const p = ensureUserConfig();
+  assert.ok(fs.existsSync(p), "首次应生成用户配置");
+  assert.ok(fs.readFileSync(p, "utf8").includes("poolUpdate"), "生成的配置应含 poolUpdate 段");
+
+  fs.writeFileSync(p, "schedule:\n  healthMin: 9\n", "utf8");
+  ensureUserConfig();
+  assert.ok(fs.readFileSync(p, "utf8").includes("healthMin: 9"), "已存在时不得覆盖用户改动");
+});
+
+test("loadConfig: 用户目录 config.yaml 生效，且深合并保留未覆盖的默认键", () => {
+  const p = userConfigPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, "schedule:\n  healthMin: 7\n", "utf8");
+  try {
+    const cfg = loadConfig();
+    assert.equal(cfg.schedule.healthMin, 7);
+    assert.equal(cfg.schedule.absentCooldownHours, 1, "未覆盖的兄弟键应保留默认值");
+  } finally {
+    fs.unlinkSync(p);
+  }
 });

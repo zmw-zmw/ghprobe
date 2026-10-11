@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 离线单测：候选池分配（不联网）
+import "./helpers.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { poolsForDomain } from "../src/probe.js";
@@ -38,12 +39,14 @@ test("poolsForDomain: 没配 domainPools 时用全部池（向后兼容旧配置
   assert.deepEqual(poolsForDomain({ ipPools: { a: ["9.9.9.9"] } }, "github.com"), ["9.9.9.9"]);
 });
 
-test("默认配置：每个目标域名都配了 domainPools，且池名都真实存在", () => {
+test("默认配置：每个目标域名都配了 domainPools，且池名都存在（auto 除外）", () => {
   const c = loadConfig();
   for (const d of c.domains) {
     const names = c.domainPools?.[d];
     assert.ok(Array.isArray(names) && names.length > 0, `${d} 缺 domainPools`);
-    for (const n of names) { assert.ok(c.ipPools?.[n]?.length, `${d} 指向了不存在的池 ${n}`); }
+    // auto 是 poolUpdate 从 api.github.com/meta 拉取后**运行时注入**的池（无缓存时为空，
+    // 探测侧会跳过），所以它不出现在静态 ipPools 里是正常的。
+    for (const n of names) { assert.ok(n === "auto" || c.ipPools?.[n]?.length, `${d} 指向了不存在的池 ${n}`); }
   }
 });
 

@@ -18,13 +18,28 @@ doh:
 # 内置候选 IP 池：补足 DoH 拿不到的候选。
 # 🔴 池子必须够宽，否则会出现「明明有活 IP，工具却报 stuck」——见下面 azure 段的说明。
 ipPools:
-  # Fastly 段：服务 githubusercontent 系（raw / objects / gist / avatars）
+  # 种子池：**最稳定的入口，建议不要删**。属于 GitHub 自租段 140.82.112.0/20，多年未变。
+  # 两个用途：① github.com / codeload 的兜底候选；
+  #          ② 拉 api.github.com/meta 更新 auto 池时的**直连入口**（该域名 DNS 在国内被污染，
+  #             只能靠这些 IP + SNI 直连；而且这一步恰恰发生在「还没有可用 IP」的时候）。
+  seed:
+    - 140.82.112.3
+    - 140.82.112.4
+    - 140.82.113.3
+    - 140.82.113.4
+    - 140.82.114.3
+    - 140.82.114.4
+    - 140.82.116.3
+    - 140.82.116.4
+    - 140.82.121.3
+  # Fastly 段：服务 githubusercontent 系（raw / objects / gist / avatars），多年不变
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
   # GitHub 自租段：服务 github.com / codeload.github.com 主站。
-  # 来源：GitHub 官方 api.github.com/meta 的 `web` 段（/32 单播）+ 140.82.112.0/20。
   # 🔴 2026-10 实测：这些 IP **在分钟级抖动** —— 同一批 IP 几分钟前全灭、现在 9/20 可用，
   #    且「活的是哪几个」每次都不一样。所以池子必须宽（靠 tcpMs 短超时兜住成本），
   #    只留少量 IP 必然出现「明明有活 IP 却报 stuck」。
+  # ⚠️ 这一池**会过期**（2026-10-11 实测：24 个里有 4 个已不在官方 web 段）——
+  #    它是「离线兜底」，真正跟得上变化的是下面 poolUpdate 自动维护的 `auto` 池。
   azure:
     # Azure 段（亚太/欧洲）
     - 20.200.245.247
@@ -56,13 +71,43 @@ ipPools:
 # 域名 -> 只探哪些池（不配 = 用全部池）。
 # 两个池互不相干：185.199.x.x 永远不给 github.com 服务，20.x 也不给 raw.githubusercontent.com
 # 服务。分开能省掉近一半候选（冷启动最明显）。池名写错时自动退回「用全部池」。
+# auto = poolUpdate 自动从 api.github.com/meta 拉下来的最新网段（缓存不存在时该池为空，自动跳过）。
+# 顺序有意义：靠前的池先占 maxPoolIps 名额。
 domainPools:
-  github.com: [azure]
-  codeload.github.com: [azure]
+  github.com: [auto, seed, azure]
+  codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]
   gist.githubusercontent.com: [fastly]
   avatars.githubusercontent.com: [fastly]
+
+# 候选池自动更新：从 GitHub 官方 api.github.com/meta 拉最新网段，缓存到用户目录，供 `auto` 池使用。
+# 为什么需要：GitHub 的 Azure 段在变，内置 azure 池会过期（实测 24 个里 4 个已失效）。
+# 🔴 api.github.com/meta 未认证限 **60 次/小时** —— 所以 intervalHours 只能大（默认每天 1 次），
+#    绝不要调到 1 以下。
+# ⚠️ 若 api.github.com 被 SNI 层封锁（换 IP 也救不回），**失败后同样等满一个周期再试**，
+#    不会反复重试 —— 那种情况下继续重试没有意义，用现有池 + DoH 继续工作即可。
+# 手动触发：`ghprobe update-pool`（不受周期限制）；自动触发：每次 health（到点才真去拉）。
+# 缓存文件：%LOCALAPPDATA%\ghprobe\pool.cache.json（自动生成，不用手改）
+poolUpdate:
+  enabled: true
+  intervalHours: 24         # 更新间隔（小时）；成功与失败同一档
+  source: "https://api.github.com/meta"
+  host: api.github.com      # TLS SNI（实际连的是 ipPools.seed 里的 IP）
+  sections: [web, api]      # 取 meta 里的哪些段
+  maxIps: 48                # 缓存里最多保留几个 IP
+  perBigNet: 4              # 大网段（/20、/22）每个采样几个 IP（不能全展开，/20 = 4096 个）
+  timeoutMs: 8000
+
+# 本地网络检查：本机断网时直接跳过本轮（不探测、不更新池、不写 hosts）。
+# 为什么需要：断网时所有候选必然全灭，跑一轮纯属浪费，日志还会被「stuck / 全灭」刷屏，
+# 把「本机没网」和「GitHub 被墙」两种情况混在一起，反而看不出真故障。
+# 两步：① 有没有「已启用且带非回环 IPv4」的网卡（零成本）；② TCP 连一下基准目标。
+# 基准目标必须是**国内任何正常网络都该能连上**的（默认阿里公共 DNS 的 DoH 端点），
+# 它只用来判断「本机能不能出去」，与 GitHub 是否可达无关。
+networkCheck:
+  enabled: true
+  probe: { host: 223.5.5.5, port: 443, timeoutMs: 2000 }
 
 # 被主机名黑名单掐掉的域名走兜底链：主候选全灭时改探测这些替身域名并写入
 fallbacks:
@@ -73,7 +118,7 @@ fallbacks:
 timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
 probe:
   maxCandidates: 8   # DoH 每域名最多取几个候选
-  maxPoolIps: 24     # 内置池每域名最多补几个。**与 DoH 各自限额，不共享总上限**（见 probe.js）
+  maxPoolIps: 32     # 内置池每域名最多补几个。**与 DoH 各自限额，不共享总上限**（见 probe.js）
   maxPerDomain: 4    # 每域名最多保留几个可用 IP（前 maxEntriesPerDomain 个会写进 hosts）
   concurrency: 10    # 全局同时握手的 socket 上限（跨域名共享）
 # hosts 写入：每域名写几条候选。

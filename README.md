@@ -19,7 +19,7 @@
 
 一句话：**ghprobe 用本地探测挑出 GitHub 相关域名当前最快、最可用的 IP，写成一份会自我维护的 hosts 块。**
 
-一轮完整流程是：本地 DoH 解析拿候选 IP → 对每个候选跑「三关探测」→ 按延迟排名 → 每域名取最优一条写进 hosts。之后由计划任务定时做健康检查，IP 死了就自动重排换新 IP。
+一轮完整流程是：先确认本机有网（断网直接跳过）→ 本地 DoH 解析 + 内置候选池（每天自动从官方 meta 更新一次）拿到候选 IP → 对每个候选跑「三关探测」→ 按延迟排名 → 每域名取最优一条 + 1 条备选写进 hosts。之后由计划任务定时做健康检查，IP 死了就自动重排换新 IP。
 
 它**不**提供代理、隧道、流量转发或协议对抗，也**不**试图「突破」什么；只在链路本身可达的前提下做三件事：**优选 IP、剔除假活节点、IP 失效时自动替换**。
 
@@ -50,11 +50,20 @@ doh:
 
 **为什么必须有第 3 关？** 因为第 2 关的证书校验挡不住「共享 CDN 上的假活 IP」。举例：Fastly 的 `185.199.x.x` 这类共享节点，会对 `github.com` 返回一张**完全合法**的证书（证书 SAN 确实匹配），但 HTTP 响应体是 `Fastly error: unknown domain` —— 这个 IP 根本没有为 `github.com` 提供服务。只做证书校验就会把这种「假活 IP」当成好节点写进 hosts，结果是 hosts 看着写成功了、GitHub 反而更连不上。第 3 关按**真实业务路径**和**响应内容**做终审，才能把它拦下来（同理，`codeload.github.com` 的根路径可能 301 跳回主站，所以探测用的是归档下载路径，不是根路径）。
 
-**③ 无代理**
+**④ 候选池每天自动跟随官方网段，且拉不到就不硬拉**
+
+候选池不只是写死在配置里的静态列表。ghprobe 每天（`poolUpdate.intervalHours`）会从 GitHub 官方 `api.github.com/meta` 拉一次最新网段，展开成候选 IP 缓存到本地，供 `auto` 池使用。这样即使 GitHub 的 Azure 段（`20.x` / `4.x`）发生变动，池子也能自己跟上 —— 实测内置的 24 个 Azure IP 里已经有 4 个不在官方 web 段了。
+
+两个细节：
+
+- **拉 meta 必须 IP 直连 + SNI**：`api.github.com` 的 DNS 在国内被污染，直接请求拿不到响应；而这一步恰恰发生在「还没有可用 IP」的时候，所以只能用配置里的**种子池**（`ipPools.seed`，GitHub 自租段 `140.82.112.0/20`，多年未变）作为直连入口。多个种子**并行**试，第一个成功就返回并掐掉其余请求。
+- **拉不到就不重试**：该 API 未认证限 **60 次/小时**，所以成功与失败**共用同一档冷却**（默认 24 小时）。如果 `api.github.com` 被 SNI 层封锁（换 IP 也救不回），反复重试毫无意义，还会白撞限流 —— 直接用现有池 + DoH 继续工作即可。
+
+**⑤ 无代理**
 
 只写 hosts 文件。不装代理软件、不改系统代理设置、不装驱动、不劫持系统流量。卸载时把 hosts 里属于 ghprobe 的那一块剥掉即可，不留残渣。
 
-**④ 故障分层认知（这是本项目的价值主张）**
+**⑥ 故障分层认知（这是本项目的价值主张）**
 
 GitHub 连不上，原因不在同一层，能修的手段也不同：
 
@@ -100,6 +109,14 @@ IP 失效往往发生在你毫无察觉的时候。没有自动检查，就只�
                         ┌─────────────────────────────────────┐
                         │  配置: domains + DoH 端点 + IP 池    │
                         └──────────────────┬──────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  本地网络检查 ──无网──▶ 跳过本轮  │  ← 断网时全灭无意义
+                          └────────────────┬────────────────┘
+                                           │有网
+                          ┌────────────────▼────────────────┐
+                          │  （每天一次）从官方 meta 更新池    │  ← 失败不重试，等下一周期
+                          └────────────────┬────────────────┘
                                            │
                           ┌────────────────▼────────────────┐
                           │  本地 DoH 联邦解析（并发，IP 直连）│  ← 绕开系统 DNS 污染
@@ -159,6 +176,8 @@ ghprobe 的核心逻辑只有一套（DoH → 三关探测 → 排名），但�
 - **部分更新 + IP 粘性**：全量重排后，只更新与当前 hosts **确实不同**的域名；健康域名的 score 微小抖动不会触发换 IP（每次换 IP 都要刷 DNS 缓存、让连接池失效，代价不低）。
 - **同名多条目兜底**：每个域名默认写「最优 + 1 条备选」。Windows 会把 hosts 里同名多条**全部返回**、客户端会**逐个尝试**，所以首条 IP 恰好抖动失效时，浏览器 / `git` 会自动走备选 —— 把「断最长 1 分钟」压成「多等一个连接超时」。条数由 `hosts.maxEntriesPerDomain` 控制（默认 2，设 1 退回单条）。
 - **`# absent` 冷却**：配置里有、hosts 里没有的域名（典型是被 SNI 层封锁、全量也救不回的域名）会记入 hosts 块内的 `# absent <域名> <时间戳>` 注释，冷却 `schedule.absentCooldownHours`（默认 1 小时）内不再重试，避免重炮每分钟空响。
+- **本地断网直接跳过**：每轮先做一次本地网络检查（① 有没有启用的非回环网卡；② TCP 连一下国内基准目标，默认 `223.5.5.5:443`）。本机没网时**不探测、不更新池、不写 hosts**，只在日志里记一条 `action=skip reason=本地无网络连接`。理由：断网时所有候选必然全灭，跑一轮纯属浪费，而且日志会被「stuck / 全灭」刷屏，把「本机没网」和「GitHub 被墙」两种情况混在一起，反而看不出真故障。基准目标刻意**不是 GitHub** —— 它只判断「本机能不能出去」，与 GitHub 是否可达无关。
+- **候选池每天自动更新**：从 GitHub 官方 `api.github.com/meta` 拉最新网段，展开成候选 IP 缓存到用户目录，供 `auto` 池使用。为什么需要：GitHub 的 Azure 段在变，内置 `azure` 池会过期（实测 24 个里有 4 个已失效）。该 API 未认证**限 60 次/小时**，所以间隔只能大（默认 24 小时）。若它被 SNI 层封锁（换 IP 也救不回），**失败后同样等满一个周期再试**，不会反复重试 —— 那种情况下继续重试没有意义，用现有池 + DoH 继续工作即可。手动触发 `ghprobe update-pool` 不受周期限制。
 - **无状态**：`# absent` 冷却表直接编码在 hosts 块注释里，跨进程、跨重启都不丢，不需要额外的状态文件。
 - **跨进程写锁**：`probe --apply` 与计划任务可能并发写 hosts，用锁文件串行化，避免读-改-写互相覆盖；抢不到锁就本轮跳过，下一轮健康检查会自动补写。
 
@@ -201,8 +220,9 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 
 **`ghprobe install` 做了什么：**
 
-1. 先做一次**健康检查式的保守探测**：只测 hosts 里已写入的 IP，健康的保留、确认失效的才重排（不会把「本轮没抓到、但现有 IP 仍然健康」的域名误记成缺失）。
-2. 弹出**一次 UAC**，在同一个管理员会话里完成两件事：
+1. **生成用户配置文件** `%LOCALAPPDATA%\ghprobe\config.yaml`（已存在则**不覆盖**，保留你的改动）—— 候选池、超时、调度间隔、本地网络检查都在里面，可以直接编辑。
+2. 先做一次**健康检查式的保守探测**：只测 hosts 里已写入的 IP，健康的保留、确认失效的才重排（不会把「本轮没抓到、但现有 IP 仍然健康」的域名误记成缺失）。若检测到**本地无网络**，本步自动跳过（必然全灭，跑了也白跑），但计划任务**照常注册**，有网后自动生效。
+3. 弹出**一次 UAC**，在同一个管理员会话里完成两件事：
    - **写一次 hosts**：先把当前 hosts 备份为 `hosts.ghprobe-bak`，写入 ghprobe 块，校验块标记存在，失败自动回滚，成功则刷新 DNS 缓存。
    - **注册名为 `ghprobe` 的 Windows 计划任务**：以**最高权限（RunLevel=Highest）静默运行**（后续写入不再弹 UAC），按 `schedule.healthMin`（默认 1 分钟）的间隔执行 `health --apply`。任务动作经一个隐藏窗口包装器启动，**无窗口**，不打扰你。
    装完即用，此后不用再敲命令。
@@ -257,6 +277,13 @@ ghprobe hosts
 ghprobe health
 ghprobe health --apply      # 检测到异常时写入系统 hosts（会弹 UAC）
 
+# 从 GitHub 官方 api.github.com/meta 更新候选池缓存（每天一次即可）
+# 该 API 未认证限 60 次/小时，所以别频繁调；health 到点也会自动调，一般不用手动
+ghprobe update-pool
+
+# 打印用户配置文件与池缓存的路径（配置文件可直接编辑）
+ghprobe config-path
+
 # 本地 HTTP API（默认 127.0.0.1:8930）
 ghprobe serve
 #   POST /api/probe    立即触发一轮探测，返回摘要
@@ -268,9 +295,27 @@ ghprobe serve
 ghprobe probe -c my.yaml
 ```
 
+### 配置文件在哪
+
+`ghprobe install` 会生成一份**用户配置文件**，放在：
+
+```
+%LOCALAPPDATA%\ghprobe\config.yaml
+```
+
+（用 `ghprobe config-path` 可随时打印这个路径。）
+
+它**优先级高于包内默认配置**，可以直接编辑：候选池、超时、调度间隔、目标域名、本地网络检查……都在里面。文件里带完整中文注释说明每个键。改完保存即可，下一轮 `health` 就生效 —— 不需要重装。
+
+> 为什么不放在包目录：npm 全局安装时包目录位于 `node_modules` 下，npm 升级/重装会**整个换掉**，放那儿用户改动会被清掉。
+>
+> 已有用户配置时 `install` **不会覆盖它**（只在文件不存在时才从包内默认复制一份）。
+
 ### 配置覆盖
 
-默认配置内置在 `config.default.yaml`。用 `-c my.yaml` 传入一个**只写你想改的部分**的 YAML 即可：对象属性（如 `timeouts` / `probe` / `serve` / `schedule`）是**递归合并**的，你只需写要改的子键。
+除了直接编辑用户配置文件，也可以用 `-c my.yaml` 传入一个**只写你想改的部分**的 YAML：对象属性（如 `timeouts` / `probe` / `serve` / `schedule`）是**递归合并**的，你只需写要改的子键。
+
+优先级：`-c 指定的文件` > `%LOCALAPPDATA%\ghprobe\config.yaml` > 包内 `config.default.yaml`。
 
 ```yaml
 # 例 1：只把 TLS 超时改成 3 秒，dohMs / httpMs 保持默认
@@ -289,33 +334,48 @@ doh:
 domains:
   - github.com
   - raw.githubusercontent.com
+
+# 例 5：关掉本地网络检查（断网时也照样跑，一般不需要）
+networkCheck:
+  enabled: false
 ```
 
-完整的默认配置（键名与默认值，均与代码一致）：
+完整的默认配置见仓库里的 `config.default.yaml`（键名、默认值、注释都以它为准），主要几项：
 
 ```yaml
-domains:
-  - github.com
-  - codeload.github.com
-  - objects.githubusercontent.com
-  - raw.githubusercontent.com
-  - gist.githubusercontent.com
-  - avatars.githubusercontent.com
-
-doh:
-  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
-  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
-  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
-
 ipPools:
+  seed: [...]     # 最稳定的入口（GitHub 自租段），建议不要删：它也是拉 meta 的直连入口
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
-  azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
+  azure: [...]    # 会过期，靠下面的 poolUpdate 自动维护的 auto 池兜住
+
+domainPools:
+  github.com: [auto, seed, azure]
+  codeload.github.com: [auto, seed, azure]
+  objects.githubusercontent.com: [fastly]
+  raw.githubusercontent.com: [fastly]
+  gist.githubusercontent.com: [fastly]
+  avatars.githubusercontent.com: [fastly]
+
+poolUpdate:
+  enabled: true
+  intervalHours: 24       # 成功与失败同一档冷却（拉不到就等满一个周期，不反复重试）
+  source: "https://api.github.com/meta"
+  host: api.github.com
+  sections: [web, api]
+  maxIps: 48
+  perBigNet: 4            # 大网段每个采样几个（/20 有 4096 个地址，不能全展开）
+  timeoutMs: 8000
+
+networkCheck:
+  enabled: true
+  probe: { host: 223.5.5.5, port: 443, timeoutMs: 2000 }
 
 fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
-timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
-probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
+timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
+probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10 }
+hosts: { maxEntriesPerDomain: 2 }
 serve: { host: 127.0.0.1, port: 8930 }
 schedule:
   healthMin: 1            # 哨兵间隔（分钟）：只测已写入 IP，异常才触发全量
@@ -333,6 +393,8 @@ ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自�
 
 - **手动回滚 hosts**：写入前会备份到 `C:\Windows\System32\drivers\etc\hosts.ghprobe-bak`；但更推荐用 `ghprobe uninstall`（它按块剥离，不会误伤第三方后来追加的条目）。
 - **健康检查日志**：`%LOCALAPPDATA%\ghprobe\ghprobe.log`。计划任务静默运行、stdout/stderr 都被丢弃，所以每轮结果会追加到这里（含 `action` / `reason` / `changed`），跑挂了能查。
+- **用户配置**：`%LOCALAPPDATA%\ghprobe\config.yaml`（可编辑，见上一节）。
+- **候选池缓存**：`%LOCALAPPDATA%\ghprobe\pool.cache.json`（`update-pool` 自动维护，不用手改）。
 - **部署日志**：用 `install.ps1` 时默认写到 `%TEMP%\ghprobe-deploy.log`。
 
 ---

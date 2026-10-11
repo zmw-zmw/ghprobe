@@ -19,7 +19,7 @@ The problem it solves is concrete: GitHub direct connections are sometimes fast,
 
 In one sentence: **ghprobe uses local probing to pick the fastest, most usable IP for each GitHub-related domain, and writes a self-maintaining hosts block.**
 
-A full round is: resolve candidate IPs via local DoH → run a "three-stage probe" on every candidate → rank by latency → write the best entry per domain into hosts. After that, a scheduled task health-checks periodically and re-ranks to swap in fresh IPs when the old ones die.
+A full round is: confirm the machine is online (offline → skip) → resolve candidate IPs via local DoH + the built-in pool (auto-refreshed from the official meta once a day) → run a "three-stage probe" on every candidate → rank by latency → write the best IP plus one spare per domain into hosts. After that, a scheduled task health-checks periodically and re-ranks to swap in fresh IPs when the old ones die.
 
 It provides **no** proxy, tunnel, traffic forwarding, or protocol evasion, and it does **not** try to "break through" anything; as long as the path is reachable in the first place, it does three things: **prefer good IPs, reject false-alive nodes, and replace IPs automatically when they fail.**
 
@@ -50,11 +50,20 @@ For each `(domain, candidate IP)`:
 
 **Why is stage 3 mandatory?** Because stage 2's certificate check cannot stop "false-alive IPs on shared CDNs." Example: a shared Fastly node such as `185.199.x.x` will return a **perfectly valid** certificate for `github.com` (the SAN really does match), yet the HTTP body is `Fastly error: unknown domain` — that IP does not serve `github.com` at all. A certificate-only check would treat such a "false-alive IP" as a good node and write it into hosts, so hosts looks successfully written while GitHub becomes *less* reachable. Stage 3 does the final judgment using the **real business path** and the **response content**, which is what filters it out (for the same reason, `codeload.github.com` is probed on the archive-download path, not the root, because the root may 301 back to the main site).
 
-**③ No proxy**
+**③ The candidate pool follows GitHub's official ranges daily, and gives up gracefully when it can't**
+
+The pool isn't just a static list hard-coded in config. Once a day (`poolUpdate.intervalHours`) ghprobe pulls the latest ranges from GitHub's official `api.github.com/meta`, expands them into candidate IPs and caches them locally for the `auto` pool. So even if GitHub's Azure ranges (`20.x` / `4.x`) shift, the pool keeps up by itself — of the 24 built-in Azure IPs, 4 are already no longer in the official web range.
+
+Two details:
+
+- **Pulling meta requires direct-IP + SNI**: `api.github.com`'s DNS is poisoned in China so a plain request gets no response — and this step happens precisely when there is no working IP yet, so it can only use the configured **seed pool** (`ipPools.seed`, GitHub's own `140.82.112.0/20`, unchanged for years) as the direct entry point. Seeds are tried **in parallel**; the first success returns immediately and the remaining in-flight requests are aborted.
+- **No retry when it fails**: that API is unauthenticated and limited to **60 requests/hour**, so success and failure **share the same cooldown** (24h by default). If `api.github.com` is blocked at the SNI layer (no IP swap can fix that), retrying is pointless and just burns the rate limit — ghprobe simply carries on with the existing pool + DoH.
+
+**④ No proxy**
 
 It writes the hosts file, and nothing else. No proxy software, no system proxy settings changed, no drivers, no traffic hijacking. Uninstalling just strips ghprobe's own block out of hosts, leaving nothing behind.
 
-**④ Fault layering (this is the project's value proposition)**
+**⑤ Fault layering (this is the project's value proposition)**
 
 "GitHub is unreachable" has causes at different layers, and the fix differs per layer:
 
@@ -101,6 +110,16 @@ IPs usually die while you are not looking. With no automatic check, you only fin
                         │  config: domains + DoH endpoints +  │
                         │  IP pool                            │
                         └──────────────────┬──────────────────┘
+                                           │
+                          ┌────────────────▼────────────────┐
+                          │  Local network check ──no net──▶ │  ← all candidates would
+                          │  skip this round                 │    be dead anyway
+                          └────────────────┬────────────────┘
+                                           │online
+                          ┌────────────────▼────────────────┐
+                          │  (once a day) refresh pool from  │  ← no retry on failure;
+                          │  official meta                   │    wait for next cycle
+                          └────────────────┬────────────────┘
                                            │
                           ┌────────────────▼────────────────┐
                           │  Local DoH federation (concurrent,│  ← bypasses
@@ -163,6 +182,8 @@ The sentinel interval comes from `schedule.healthMin`, default **1 minute** (als
 - **Partial update + IP stickiness**: after a full re-rank, only domains that **actually differ** from the current hosts are updated; tiny score jitter on a healthy domain won't trigger an IP change (each change costs a DNS cache flush and invalidates connection pools).
 - **Duplicate-entry fallback**: each domain gets its best IP **plus one spare** by default. Windows returns *all* same-name entries and clients try them one by one, so if the first IP happens to die mid-jitter, the browser / `git` automatically falls through to the spare — turning a "down for up to a minute" into "one extra connect timeout". Count is controlled by `hosts.maxEntriesPerDomain` (default 2; set 1 for the old single-entry behavior).
 - **`# absent` cooldown**: domains present in config but absent from hosts (typically SNI-blocked domains that even a full run can't save) are recorded as a `# absent <domain> <timestamp>` comment inside the hosts block, and are not retried for `schedule.absentCooldownHours` (default 1 hour), so the heavy tier doesn't fire uselessly every minute.
+- **Local offline → skip entirely**: each round starts with a local network check — ① is there an enabled, non-loopback interface; ② can we TCP-connect to a domestic baseline target (default `223.5.5.5:443`). If the machine is offline it **does not probe, does not refresh the pool, does not write hosts** — it only logs `action=skip reason=本地无网络连接`. Rationale: offline, every candidate is necessarily dead, so a round is pure waste, and the log gets flooded with "stuck / all-dead", mixing "this machine has no network" with "GitHub is blocked" and hiding the real fault. The baseline target is deliberately **not GitHub** — it only answers "can this machine get out", independent of whether GitHub is reachable.
+- **Candidate pool refreshed daily**: pull the latest network ranges from GitHub's official `api.github.com/meta`, expand them into candidate IPs, cache them locally and feed the `auto` pool. Why: GitHub's Azure ranges change and the built-in `azure` pool goes stale (4 of 24 measured IPs were already gone). That API is unauthenticated and limited to **60 requests/hour**, so the interval can only be large (24h by default). If it gets blocked at the SNI layer (no IP swap can fix that), **a failure waits a full cycle too** — retrying is pointless there, so ghprobe just keeps working with the existing pool + DoH. Manual trigger: `ghprobe update-pool`, which ignores the interval.
 - **Stateless**: the `# absent` cooldown table is encoded directly in the hosts block comments — it survives process restarts and cross-process runs with no extra state file.
 - **Cross-process write lock**: `probe --apply` and the scheduled task may write hosts concurrently, so a lock file serializes them and avoids read-modify-write clobbering; if the lock can't be acquired the round is skipped and the next health check writes it.
 
@@ -205,8 +226,9 @@ ghprobe uninstall   # stop: remove the scheduled task and restore hosts
 
 **What `ghprobe install` does:**
 
-1. Runs a **conservative health-check-style probe** first: it tests only the IPs already written into hosts, keeping the healthy ones and re-ranking only the confirmed-dead ones (so domains whose current IP is still healthy but weren't captured this round are not misrecorded as missing).
-2. Prompts for **a single UAC**, then in the same elevated session does two things:
+1. **Generates the user config file** `%LOCALAPPDATA%\ghprobe\config.yaml` (it **does not overwrite** an existing one, so your edits survive) — candidate pools, timeouts, scheduling interval and the local network check all live there, ready to edit.
+2. Runs a **conservative health-check-style probe** first: it tests only the IPs already written into hosts, keeping the healthy ones and re-ranking only the confirmed-dead ones (so domains whose current IP is still healthy but weren't captured this round are not misrecorded as missing). If it detects **no local network**, this step is skipped automatically (everything would be dead anyway) but the scheduled task **is still registered**, and takes effect once you're back online.
+3. Prompts for **a single UAC**, then in the same elevated session does two things:
    - **Writes hosts once**: backs up the current hosts to `hosts.ghprobe-bak`, writes the ghprobe block, verifies the block marker exists, rolls back automatically on failure, and flushes the DNS cache on success.
    - **Registers the Windows scheduled task named `ghprobe`**: it runs **silently at highest privileges (RunLevel=Highest)** (so later writes never prompt UAC again) and runs `health --apply` on the `schedule.healthMin` interval (default 1 minute). The task action is launched through a hidden-window wrapper, so it is **windowless** and does not disturb you.
 
@@ -262,6 +284,14 @@ ghprobe hosts
 ghprobe health
 ghprobe health --apply      # write to system hosts when a problem is detected (UAC prompt)
 
+# Refresh the candidate pool from GitHub's official api.github.com/meta (once a day is enough)
+# That API is limited to 60 requests/hour unauthenticated, so don't call it often.
+# health also does this on schedule, so you rarely need it manually.
+ghprobe update-pool
+
+# Print the paths of the user config file and the pool cache (the config file is editable)
+ghprobe config-path
+
 # Local HTTP API (default 127.0.0.1:8930)
 ghprobe serve
 #   POST /api/probe    trigger one probe round, return a summary
@@ -273,9 +303,27 @@ ghprobe serve
 ghprobe probe -c my.yaml
 ```
 
+### Where the config file lives
+
+`ghprobe install` generates a **user config file** at:
+
+```
+%LOCALAPPDATA%\ghprobe\config.yaml
+```
+
+(`ghprobe config-path` prints this path at any time.)
+
+It **takes priority over the built-in default config** and can be edited directly: candidate pools, timeouts, scheduling interval, target domains, local network check — all live there. The file ships with full comments (in Chinese) explaining every key. Save it and the next `health` round picks it up — no reinstall needed.
+
+> Why not in the package directory: with a global npm install the package lives under `node_modules`, and npm upgrades/reinstalls **replace it entirely**, wiping your edits.
+>
+> If a user config already exists, `install` **will not overwrite it** (it only copies the built-in default when the file is missing).
+
 ### Configuration override
 
-The default config is built in (`config.default.yaml`). Pass a YAML file containing **only the parts you want to change** via `-c my.yaml`: object properties (such as `timeouts` / `probe` / `serve` / `schedule`) are **merged recursively**, so you only write the keys you want to change.
+Besides editing the user config file directly, you can also pass a YAML file containing **only the parts you want to change** via `-c my.yaml`: object properties (such as `timeouts` / `probe` / `serve` / `schedule`) are **merged recursively**, so you only write the keys you want to change.
+
+Priority: the file given by `-c` > `%LOCALAPPDATA%\ghprobe\config.yaml` > the built-in `config.default.yaml`.
 
 ```yaml
 # Example 1: change only the TLS timeout to 3s; dohMs / httpMs keep their defaults
@@ -294,33 +342,48 @@ doh:
 domains:
   - github.com
   - raw.githubusercontent.com
+
+# Example 5: turn off the local network check (run even when offline; rarely needed)
+networkCheck:
+  enabled: false
 ```
 
-The full default config (key names and defaults, all matching the code):
+The full default config lives in `config.default.yaml` in the repo (that file is the source of truth for key names, defaults and comments). The main parts:
 
 ```yaml
-domains:
-  - github.com
-  - codeload.github.com
-  - objects.githubusercontent.com
-  - raw.githubusercontent.com
-  - gist.githubusercontent.com
-  - avatars.githubusercontent.com
-
-doh:
-  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
-  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
-  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
-
 ipPools:
+  seed: [...]     # the most stable entry point (GitHub's own range); keep it — it's also the direct entry for pulling meta
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
-  azure: [20.27.177.113, 4.208.26.197, 140.82.112.3]
+  azure: [...]    # goes stale; the auto pool maintained by poolUpdate below covers it
+
+domainPools:
+  github.com: [auto, seed, azure]
+  codeload.github.com: [auto, seed, azure]
+  objects.githubusercontent.com: [fastly]
+  raw.githubusercontent.com: [fastly]
+  gist.githubusercontent.com: [fastly]
+  avatars.githubusercontent.com: [fastly]
+
+poolUpdate:
+  enabled: true
+  intervalHours: 24       # success and failure share one cooldown (a failed pull waits a full cycle, no retry storm)
+  source: "https://api.github.com/meta"
+  host: api.github.com
+  sections: [web, api]
+  maxIps: 48
+  perBigNet: 4            # how many IPs to sample per big range (/20 holds 4096 addresses; never expand fully)
+  timeoutMs: 8000
+
+networkCheck:
+  enabled: true
+  probe: { host: 223.5.5.5, port: 443, timeoutMs: 2000 }
 
 fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
-timeouts: { dohMs: 5000, tlsMs: 6000, httpMs: 6000 }
-probe: { maxCandidates: 8, maxPerDomain: 4, concurrency: 6 }
+timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
+probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10 }
+hosts: { maxEntriesPerDomain: 2 }
 serve: { host: 127.0.0.1, port: 8930 }
 schedule:
   healthMin: 1            # sentinel interval (minutes): test written IPs only, full re-rank on failure
@@ -337,6 +400,8 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 - **Manual hosts rollback**: before each write the file is backed up to `C:\Windows\System32\drivers\etc\hosts.ghprobe-bak`; but `ghprobe uninstall` is preferred (it strips by block and won't harm third-party entries added later).
 - **Health-check log**: `%LOCALAPPDATA%\ghprobe\ghprobe.log`. The scheduled task runs silently and both stdout/stderr are discarded, so each round's result is appended here (`action` / `reason` / `changed`) so you can investigate if something breaks.
+- **User config**: `%LOCALAPPDATA%\ghprobe\config.yaml` (editable — see the previous section).
+- **Pool cache**: `%LOCALAPPDATA%\ghprobe\pool.cache.json` (maintained by `update-pool`; don't edit by hand).
 - **Deploy log**: with `install.ps1`, written to `%TEMP%\ghprobe-deploy.log` by default.
 
 ---
