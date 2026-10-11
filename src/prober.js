@@ -7,54 +7,69 @@ import https from "node:https";
 
 // 目标域名的应用层指纹：真实业务路径、必须包含的响应特征、允许状态码、拒绝特征、允许跳转的 host
 // 路径必须能代表真实业务；codeload 用归档下载路径，避免根路径 301 到 github.com 主站骗过校验
+//
+// 🔴 状态码白名单的取舍（2026-10-11 实测踩坑）：
+//    白名单里放 4xx 等于给「不服务该域名的假活 IP」发通行证 —— 它们 TCP/TLS 都通、
+//    证书也合法（同属 GitHub 的 CDN），但 HTTP 层对所有路径回 4xx。实测
+//    `20.205.243.161` 对 github.com 的 `/`、`/login` 全回 **400**，响应体还是
+//    **GitHub 自己的错误页**（`<title>Bad request &middot; GitHub</title>`）——
+//    于是 `mustContain:["github"]` 也命中，三道判据全部放行，该 IP 被排到第 1 名写进 hosts，
+//    用户拿到 400。更糟的是「同名多条目 fallback」兜不住它：**400 是合法 HTTP 响应，
+//    不是连接失败，客户端不会回退到备选**。
+//    → 规则：**路径 `/` 只接受 200/3xx**。只有那些「根路径本来就不存在合法内容」的域名
+//    （objects 根路径是 Varnish 的 404、gist 是 301）才保留 4xx，且靠 reject 词表兜底。
 export const DOMAIN_SIG = {
   "github.com": {
     path: "/",
     mustContain: ["github"],
-    allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404],
-    reject: ["unknown domain", "Fastly error"],
+    // 只留 2xx/3xx：根路径必须真的返回 GitHub 首页（或跳转到 github.com）
+    allow: [200, 204, 301, 302, 303, 304, 307, 308],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["github.com"],
   },
   "codeload.github.com": {
     path: "/torvalds/linux/tar.gz/refs/heads/master",
     mustContain: [],
     allow: [200, 204, 302, 303, 304, 307, 308],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["codeload.github.com", "objects.githubusercontent.com"],
   },
   "objects.githubusercontent.com": {
+    // ⚠️ 根路径必然 404（实测 Varnish 返回纯 "404 Not Found"，响应体里没有 "github"），
+    //    所以这里无法用 mustContain 兜底，4xx 必须留在白名单里 —— 是已知的判据弱点，
+    //    实际靠 reject 词表（unknown domain / Fastly error）拦假活节点。
     path: "/",
     mustContain: [],
     allow: [200, 204, 302, 303, 304, 307, 308, 400, 401, 403, 404],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["objects.githubusercontent.com"],
   },
   "raw.githubusercontent.com": {
     path: "/torvalds/linux/README.md",
     mustContain: ["Linux kernel"],
     allow: [200, 204, 302, 303, 304, 307, 308],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["raw.githubusercontent.com", "objects.githubusercontent.com"],
   },
   "gist.githubusercontent.com": {
     path: "/",
     mustContain: [],
     allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["gist.githubusercontent.com", "gist.github.com"],
   },
   "avatars.githubusercontent.com": {
     path: "/u/1?v=4",
     mustContain: [],
     allow: [200, 204, 302, 303, 304, 307, 308],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["avatars.githubusercontent.com"],
   },
   "cdn.jsdelivr.net": {
     path: "/gh/torvalds/linux@master/README",
     mustContain: ["Linux kernel"],
     allow: [200, 204, 301, 302, 303, 304, 307, 308],
-    reject: ["unknown domain", "Fastly error"],
+    reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["cdn.jsdelivr.net", "www.jsdelivr.com", "jsdelivr.net"],
   },
 };
@@ -129,7 +144,7 @@ export function checkHttpResponse(statusCode, body, location, sig) {
 // 第三关：HTTP GET（host=IP、SNI=域名、Host头=域名），读少量响应体做终审
 function httpProbe(ip, domain, httpMs) {
   return new Promise((resolve) => {
-    const sig = DOMAIN_SIG[domain] || { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404], reject: ["unknown domain", "Fastly error"], redirectHosts: [] };
+    const sig = DOMAIN_SIG[domain] || { path: "/", mustContain: [], allow: [200, 204, 301, 302, 303, 304, 307, 308], reject: ["unknown domain", "Fastly error", "bad request"], redirectHosts: [] };
     const t0 = Date.now();
     const req = https.request({
       host: ip, servername: domain, method: "GET", path: sig.path, timeout: httpMs,

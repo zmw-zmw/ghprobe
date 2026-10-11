@@ -89,11 +89,33 @@ export function shouldKeepOldBlock(oldContent, newBlock) {
   return parseBlock(newBlock).entries.size === 0 && parseBlock(oldContent).entries.size > 0;
 }
 
-// 决策（纯函数）：输入已写入 IP 的探活结果 + 当前块状态，输出动作
+// 决策（纯函数）：输入「已写入条目的探活结果」+ 当前块状态，输出动作
 // 横向判据：严格多数条目同时失败视为网络故障（本轮不动，避开黑洞窗口）；
 // 单条目失败或缺失域名（非冷却）才触发全量重排
+//
+// 🔴 2026-10-11 两个关键修正：
+//   ① 探活结果现在**同时包含主条目与备选条目**（每条带 role: "main" / "alt"）。
+//      一个域名只有「它所有已写入条目全部失败」才算挂 —— 备选还活着时不该重排。
+//   ② 主挂了、备选活着 → **把备选提上来（promote）**，不重排。
+//      这条是针对实测故障的：主 IP 变成假活（返回 400）而备选是好的，旧逻辑不知道备选存在，
+//      直接去重排 → 撞上 IP 抖动窗口 → 换了个更差的，用户反而断网。
+//      备选本来就是为了这一刻存在的，不该只写不读。
 export function decide(probeResults, current, cfg) {
-  const failed = new Set(probeResults.filter((r) => !r.ok).map((r) => r.domain));
+  // 按域名聚合：只有全部条目都失败才算这个域名挂了
+  const byDomain = new Map();
+  for (const r of probeResults) {
+    if (!byDomain.has(r.domain)) { byDomain.set(r.domain, []); }
+    byDomain.get(r.domain).push(r);
+  }
+  const failed = new Set();
+  const promote = new Map();
+  for (const [d, rs] of byDomain) {
+    const alive = rs.filter((r) => r.ok);
+    if (alive.length === 0) { failed.add(d); continue; }
+    // 主条目失败但有备选活着 -> 提升备选（不重排）
+    const main = rs.find((r) => r.role !== "alt");
+    if (main && !main.ok) { promote.set(d, alive[0].ip); }
+  }
   const total = current.entries.size;
 
   // 只有「已写入条目全部失败」才可能是网络级故障（黑洞窗口），此时本轮不动、避开窗口。
@@ -101,7 +123,7 @@ export function decide(probeResults, current, cfg) {
   // 🔴 旧判据 `failed.size * 2 > total`（多数失败即放弃）已证实会误触发：分母只数已写入
   //    条目、常低到 3~4，实测「3 条陈旧 + 1 条健康」被误判成断网 → 该修的时候不修。
   if (total >= 2 && failed.size === total) {
-    return { action: "none", reason: "全部已写入 IP 同时失败，疑似网络故障" };
+    return { action: "none", reason: "全部已写入 IP 同时失败，疑似网络故障", promote: new Map() };
   }
 
   const cooldownMs = (cfg.schedule?.absentCooldownHours ?? 1) * 3600_000;
@@ -118,15 +140,20 @@ export function decide(probeResults, current, cfg) {
   const orphan = [...current.entries.keys()].filter((d) => !targets.includes(d));
 
   const diagnose = [...new Set([...failed, ...missing, ...orphan])];
-  if (diagnose.length === 0) { return { action: "none", reason: "全部健康" }; }
-  return { action: "full", domains: diagnose, reason: `需重排: ${diagnose.join(", ")}` };
+  if (diagnose.length === 0 && promote.size === 0) {
+    return { action: "none", reason: "全部健康", promote: new Map() };
+  }
+  if (diagnose.length === 0) {
+    return { action: "full", domains: [], promote, reason: `主 IP 失效，提上备选: ${[...promote.keys()].join(", ")}` };
+  }
+  return { action: "full", domains: diagnose, promote, reason: `需重排: ${diagnose.join(", ")}` };
 }
 
 // 部分更新（纯函数）：只改 diagnose 域名；全灭护栏保证不把好 IP 写成空
 // 返回的新 entries/absent 用于与当前对比，changed 记录真正换掉 IP 的域名
 // stuck：被诊断了、但本轮一个活 IP 都没找到、只能保留旧值的域名（黑洞窗口里必然出现，
 //        显式报出来，否则日志只写「无变化」会让人以为工具没干活）
-export function applyDelta(current, ranked, extra, diagnose, cfg) {
+export function applyDelta(current, ranked, extra, diagnose, cfg, promote = new Map()) {
   const entries = new Map(current.entries);
   const extras = new Map(current.extras || []);
   const absent = new Map(current.absent);
@@ -135,13 +162,31 @@ export function applyDelta(current, ranked, extra, diagnose, cfg) {
   const allResult = new Map([...ranked, ...extra]);
   const maxPer = Math.max(1, cfg.hosts?.maxEntriesPerDomain ?? 2);
 
+  // 0) 提升：主 IP 失效、备选还活着 -> 备选上位，旧主降为备选。
+  //    旧主留着当兜底 —— GitHub 的 IP 是分钟级抖动，它可能下一分钟就活了。
+  for (const [d, ip] of promote) {
+    const oldMain = entries.get(d);
+    const alts = (extras.get(d) || []).filter((x) => x !== ip);
+    if (oldMain && oldMain !== ip && !alts.includes(oldMain)) { alts.unshift(oldMain); }
+    entries.set(d, ip);
+    const kept = alts.slice(0, maxPer - 1);
+    if (kept.length) { extras.set(d, kept); } else { extras.delete(d); }
+    absent.delete(d);
+    changed.push(d);
+  }
+
   for (const d of diagnose) {
     const list = allResult.get(d) || [];
     const best = list[0];
     if (best) {
       if (entries.get(d) !== best.ip) { entries.set(d, best.ip); changed.push(d); }
-      const alt = list.slice(1, maxPer).map((x) => x.ip);
-      if (alt.length) { extras.set(d, alt); } else { extras.delete(d); }
+      // 🔴 备选是「合并」而不是「覆盖」：本轮只探到 1 个活 IP 时，把原有备选保留下来。
+      //    旧写法 `alt.length ? set : delete` 会在抖动窗口里（活 IP 少）顺手删掉备选 ——
+      //    恰恰在最需要 fallback 的时候把兜底丢了。新的排前、旧的排后，超出 maxPer 截断。
+      const freshAlt = list.slice(1, maxPer).map((x) => x.ip);
+      const oldAlt = (extras.get(d) || []).filter((x) => x !== best.ip);
+      const merged = [...new Set([...freshAlt, ...oldAlt])].slice(0, maxPer - 1);
+      if (merged.length) { extras.set(d, merged); } else { extras.delete(d); }
       absent.delete(d);
     } else if (!entries.has(d)) {
       absent.set(d, now);
@@ -190,10 +235,18 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS) 
     return fullUpdate(cfg, log, content, current, targetDomains(cfg), write, hostsPath);
   }
 
-  const jobs = [...current.entries].map(([d, ip]) => () => probeIp(d, ip, cfg));
-  const probeResults = await pool(jobs, cfg.probe.concurrency);
+  // 🔴 主条目 + 备选条目一起探活。旧版只探主条目 —— 于是「主 IP 挂了、备选还是好的」
+  //    这种最常见的情况工具根本不知道，直接去重排（撞抖动窗口），而它本来只需把备选提上来。
+  const pairs = [];
+  for (const [d, ip] of current.entries) {
+    pairs.push([d, ip, "main"]);
+    for (const alt of current.extras.get(d) || []) { pairs.push([d, alt, "alt"]); }
+  }
+  const jobs = pairs.map(([d, ip]) => () => probeIp(d, ip, cfg));
+  const probed = await pool(jobs, cfg.probe.concurrency);
+  const probeResults = probed.map((r, i) => ({ ...r, role: pairs[i][2] }));
   for (const r of probeResults) {
-    say(`${r.ok ? "[OK ]" : "[FAIL]"} ${r.domain} @ ${r.ip} err=${r.err}`);
+    say(`${r.ok ? "[OK ]" : "[FAIL]"}${r.role === "alt" ? " ALT" : "    "} ${r.domain} @ ${r.ip} err=${r.err}`);
   }
 
   const decision = decide(probeResults, current, cfg);
@@ -203,16 +256,17 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS) 
   }
 
   say(`异常：${decision.reason}`);
-  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath);
+  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath, decision.promote);
 }
 
 // 全量探测 + 部分更新 + 写回；护栏与粘性都在 applyDelta 里体现。
 // 只探 diagnose 里的域名：典型场景是「github.com 的 IP 死了，codeload / jsdelivr 还活着」，
 // 此时探 1 个域名（~8 个候选）而不是 6 个（~48 个），失败发现到修好的时间从 ~90s 压到 ~20s。
-async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS) {
+async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map()) {
   const say = log || (() => {});
-  const r = await runProbe(cfg, log, diagnose);
-  const d = applyDelta(current, r.ranked, r.extra, diagnose, cfg);
+  // diagnose 为空 = 只有「提上备选」要做，没有需要重排的域名 -> 跳过探测，直接写提升结果
+  const r = diagnose.length ? await runProbe(cfg, log, diagnose) : { ranked: new Map(), extra: new Map() };
+  const d = applyDelta(current, r.ranked, r.extra, diagnose, cfg, promote);
 
   const entriesChanged = !sameMap(d.entries, current.entries);
   const absentChanged = !sameMap(d.absent, current.absent);
@@ -224,7 +278,13 @@ async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath
   }
 
   const block = buildHealthBlock(d.entries, d.absent, d.extras);
-  const msg = d.changed.length ? `更新域名: ${d.changed.join(", ")}` : "更新缺失域名冷却记录";
+  // 日志里把「提上备选」和「重排换 IP」分开写，否则看日志分不清是哪种动作
+  const promoted = [...promote.keys()];
+  const reranked = d.changed.filter((x) => !promote.has(x));
+  const parts = [];
+  if (promoted.length) { parts.push(`提上备选: ${promoted.join(", ")}`); }
+  if (reranked.length) { parts.push(`重排换 IP: ${reranked.join(", ")}`); }
+  const msg = parts.length ? parts.join("；") : "更新缺失域名冷却记录";
   if (write) {
     const lock = acquireHostsLock();
     if (!lock) {

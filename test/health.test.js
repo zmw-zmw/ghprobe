@@ -354,3 +354,98 @@ test("blockFromProbeResult: 每域名写多条（主 IP + 备选）", () => {
   assert.equal(p.entries.get("github.com"), "20.205.243.166");
   assert.deepEqual(p.extras.get("github.com"), ["20.200.245.247"]);
 });
+
+// ============================================================================
+// 2026-10-11 新增：针对线上实测故障（主 IP 变假活、备选是好的却没人管）
+// 旧逻辑只探主条目，于是「主挂了 + 备选活着」被当成「域名挂了」-> 直接重排 ->
+// 撞上 IP 抖动窗口 -> 换了个更差的，用户反而断网。备选不该只写不读。
+// ============================================================================
+
+// 只用被测域名建 cfg：否则 cfg.domains 里没写进 entries 的域名会被当成「缺失」纳入重排，干扰断言
+const ghOnlyCfg = { domains: ["github.com"], schedule: { absentCooldownHours: 1 } };
+const ghCoCfg = { domains: ["github.com", "codeload.github.com"], schedule: { absentCooldownHours: 1 } };
+
+test("decide: 主 IP 挂、备选活着 -> 提上备选，不重排", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"]]),
+    extras: new Map([["github.com", ["2.2.2.2"]]]),
+    absent: new Map(),
+  };
+  const d = decide([
+    { domain: "github.com", ip: "1.1.1.1", ok: false, role: "main" },
+    { domain: "github.com", ip: "2.2.2.2", ok: true, role: "alt" },
+  ], current, ghOnlyCfg);
+  assert.equal(d.action, "full");
+  assert.deepEqual(d.domains, [], "有活着的备选就不该重排");
+  assert.equal(d.promote.get("github.com"), "2.2.2.2");
+});
+
+test("decide: 主 IP 与备选全挂 -> 才纳入重排", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "3.3.3.3"]]),
+    extras: new Map([["github.com", ["2.2.2.2"]]]),
+    absent: new Map(),
+  };
+  const d = decide([
+    { domain: "github.com", ip: "1.1.1.1", ok: false, role: "main" },
+    { domain: "github.com", ip: "2.2.2.2", ok: false, role: "alt" },
+    { domain: "codeload.github.com", ip: "3.3.3.3", ok: true, role: "main" },
+  ], current, ghCoCfg);
+  assert.equal(d.action, "full");
+  assert.deepEqual(d.domains, ["github.com"]);
+  assert.equal(d.promote.size, 0);
+});
+
+test("decide: 主全挂但备选都活 -> 不误判成网络故障", () => {
+  // 横向判据按「域名」而非「条目」计数：域名还有活着的条目就不算全灭
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"], ["codeload.github.com", "3.3.3.3"]]),
+    extras: new Map([["github.com", ["2.2.2.2"]], ["codeload.github.com", ["4.4.4.4"]]]),
+    absent: new Map(),
+  };
+  const d = decide([
+    { domain: "github.com", ip: "1.1.1.1", ok: false, role: "main" },
+    { domain: "github.com", ip: "2.2.2.2", ok: true, role: "alt" },
+    { domain: "codeload.github.com", ip: "3.3.3.3", ok: false, role: "main" },
+    { domain: "codeload.github.com", ip: "4.4.4.4", ok: true, role: "alt" },
+  ], current, ghCoCfg);
+  assert.equal(d.action, "full");
+  assert.deepEqual(d.domains, []);
+  assert.deepEqual([...d.promote.keys()].sort(), ["codeload.github.com", "github.com"]);
+});
+
+test("applyDelta: promote 把备选提为主 IP，旧主降为备选（留着当兜底）", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"]]),
+    extras: new Map([["github.com", ["2.2.2.2"]]]),
+    absent: new Map(),
+  };
+  const d = applyDelta(current, new Map(), new Map(), [], cfg, new Map([["github.com", "2.2.2.2"]]));
+  assert.equal(d.entries.get("github.com"), "2.2.2.2");
+  assert.deepEqual(d.extras.get("github.com"), ["1.1.1.1"]);
+  assert.deepEqual(d.changed, ["github.com"]);
+});
+
+test("applyDelta: 本轮活 IP 不足时不删原有备选（保住 fallback）", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"]]),
+    extras: new Map([["github.com", ["9.9.9.9"]]]),
+    absent: new Map(),
+  };
+  // 抖动窗口里只探到 1 个活 IP；旧写法 `alt.length ? set : delete` 会把备选删掉
+  const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["github.com"], cfg);
+  assert.equal(d.entries.get("github.com"), "1.1.1.1");
+  assert.deepEqual(d.extras.get("github.com"), ["9.9.9.9"]);
+});
+
+test("applyDelta: 探到新备选时排在前，旧备选在后，按 maxEntriesPerDomain 截断", () => {
+  const current = {
+    entries: new Map([["github.com", "1.1.1.1"]]),
+    extras: new Map([["github.com", ["9.9.9.9"]]]),
+    absent: new Map(),
+  };
+  const ranked = new Map([["github.com", [{ ip: "1.1.1.1" }, { ip: "5.5.5.5" }]]]);
+  const d = applyDelta(current, ranked, new Map(), ["github.com"], cfg);
+  assert.deepEqual(d.extras.get("github.com"), ["5.5.5.5"]);
+});

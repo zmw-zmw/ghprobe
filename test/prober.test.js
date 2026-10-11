@@ -25,10 +25,29 @@ test("checkHttpResponse: 302 含特征视为存活", () => {
   assert.equal(r.ok, true);
 });
 
-test("checkHttpResponse: 4xx 视为服务存在（路径/鉴权问题）", () => {
-  // github.com 根路径 4xx 也含 GitHub 特征
-  assert.equal(checkHttpResponse(404, "GitHub - 404", null, gh).ok, true);
-  assert.equal(checkHttpResponse(403, "GitHub - forbidden", null, gh).ok, true);
+// 🔴 2026-10-11 行为反转（原来是「4xx 视为服务存在」）。
+// 线上实测：`20.205.243.161` 对 github.com 的 `/`、`/login` 全回 **400**，
+// 而响应体是 **GitHub 自己的错误页**（`<title>Bad request &middot; GitHub</title>`）——
+// 于是旧判据 `mustContain:["github"]` 也命中，把它当成「服务存在」，排到第 1 名写进 hosts。
+// 用户拿到 400，且**不会 fallback 到备选**（400 是合法 HTTP 响应，不是连接失败）。
+// 现在：根路径只接受 2xx/3xx；响应体含 "bad request" 也直接拒。
+test("checkHttpResponse: github.com 的 4xx 判死（假活 IP 的关键拦截点）", () => {
+  const body400 = '<html><head><title>Bad request &middot; GitHub</title></head></html>';
+  const r400 = checkHttpResponse(400, body400, null, gh);
+  assert.equal(r400.ok, false);
+  assert.ok(r400.err.includes("bad request") || r400.err.includes("status:400"));
+
+  // 403 / 404 同理：体里含 GitHub 特征，但状态码不在白名单 -> 判死
+  assert.equal(checkHttpResponse(404, "GitHub - 404", null, gh).ok, false);
+  assert.equal(checkHttpResponse(403, "GitHub - forbidden", null, gh).ok, false);
+});
+
+// 反向保护：objects 的根路径本来就是 404（实测 Varnish 返回纯 "404 Not Found"，体里没有 github），
+// 所以它的 4xx 必须继续放行，否则会把正常节点全判死。
+test("checkHttpResponse: objects 的 4xx 仍放行（根路径本来就是 404）", () => {
+  const objects = DOMAIN_SIG["objects.githubusercontent.com"];
+  assert.equal(checkHttpResponse(404, "404 Not Found", null, objects).ok, true);
+  assert.equal(checkHttpResponse(200, "<html>GitHub</html>", null, objects).ok, true);
 });
 
 test("checkHttpResponse: 5xx 判死", () => {
