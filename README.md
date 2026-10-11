@@ -54,32 +54,54 @@ flowchart LR
 
 要求 Node.js >= 18（Windows 首发）。
 
+### 一键部署（推荐，装完之后不用再碰命令行）
+
+双击 `install.cmd`，或在 PowerShell 里执行：
+
+```powershell
+.\install.ps1
+```
+
+它会：自提权（**全程只弹一次 UAC**）→ 检查 Node 版本 → 安装依赖 → 注册计划任务 → 立即写入一次 hosts → **自检并把结果打回当前窗口**。装完即用；此后每 5 分钟自动健康检查，IP 陈旧时自动重排。
+
+```powershell
+.\install.ps1 -SkipProbe    # 只注册计划任务，等首轮健康检查自己写 hosts
+.\install.ps1 -Uninstall    # 卸载：删除计划任务并还原 hosts
+```
+
+> 部署链路只依赖 Node.js 与仓库自身源码，不含任何闭源组件。
+> 若你通过远程桌面/向日葵操作本机，注意 **UAC 弹窗走的是安全桌面，远程画面里可能看不到** —— 请在物理机前执行，或改用「以管理员身份运行」的终端。
+
+### 手动命令
+
 ```bash
 # 1. 跑一轮探测，看结果（不动系统）
-npx ghprobe probe
+node bin/ghprobe.js probe
 
 # 2. 跑一轮并写入系统 hosts（弹 UAC，原 hosts 自动备份为 *.ghprobe-bak）
-npx ghprobe probe --apply
+node bin/ghprobe.js probe --apply
 
 # 3. 只生成 hosts 块文本，自己决定是否写入
-npx ghprobe hosts
+node bin/ghprobe.js hosts
 
 # 4. 注册计划任务：每 5 分钟健康检查，异常才全量换 IP（runlevel=highest，静默提权）
-npx ghprobe install
+node bin/ghprobe.js install
 
 # 5. 手动做一次健康检查（不写 hosts，异常只预览；加 --apply 才写）
-npx ghprobe health
+node bin/ghprobe.js health
 
 # 6. 删除计划任务并还原 hosts
-npx ghprobe uninstall
+node bin/ghprobe.js uninstall
 
 # 7. 本地 API（默认 127.0.0.1:8930）
-npx ghprobe serve
+node bin/ghprobe.js serve
 #   POST /api/probe   触发探测
 #   GET  /api/status  最近结果
 #   GET  /api/hosts   生成的 hosts 块
 #   GET  /api/config  当前配置
 ```
+
+> 仓库尚未发布到 npm，因此上面用 `node bin/ghprobe.js`；`package.json` 已声明 `bin`，发布后 `npx ghprobe` 等价。
 
 ## 配置
 
