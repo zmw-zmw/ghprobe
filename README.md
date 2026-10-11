@@ -141,19 +141,24 @@ schedule: { intervalHours: 6 }
 
 ## License
 
-本项目以 **GNU General Public License v3.0**（SPDX 标识符：`GPL-3.0`）发布。
+**ghprobe** 以 **GNU General Public License v3.0** 发布，授权范围 **GPL-3.0-or-later**（SPDX 标识符：`GPL-3.0-or-later`）——即被许可方可选择按 GPL v3 或任何后续版本使用。
 
 ```
+ghprobe — GitHub 直连优选：本地 DoH 解析 + TLS 证书终审探测 + hosts 生成（无代理）
 Copyright (C) 2026 zmw
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
-the Free Software Foundation, version 3 of the License.
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ```
 
 你可以自由地运行、研究、修改和再分发本软件，但需满足 GPL-3.0 的以下条件：
@@ -162,4 +167,4 @@ GNU General Public License for more details.
 - **保留声明**：不得移除版权声明、许可声明与免责声明
 - **无担保**：作者不提供任何明示或默示担保（详见 GPL-3.0 第 15、16 条）
 
-完整协议文本见仓库根目录的 [`LICENSE`](LICENSE)；每个源文件头部均带 `SPDX-License-Identifier: GPL-3.0` 声明。
+完整协议文本见仓库根目录的 [`LICENSE`](LICENSE)（顶部为版权声明，下方为 GPL-3.0 逐字正文）；每个源文件头部均带 `SPDX-License-Identifier: GPL-3.0-or-later` 声明。

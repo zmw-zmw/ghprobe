@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // hosts 片段生成 + 事务化提权写入 + 还原 + DNS 缓存刷新
 import fs from "node:fs";

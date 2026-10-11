@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // 排名选优：按域名分组，只留三关全过的，score 升序，每域名限量
 export function rank(results, cfg) {

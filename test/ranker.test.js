@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // 离线单测：排名与兜底链决策
 import { test } from "node:test";

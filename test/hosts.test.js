@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // 离线单测：hosts 块生成与合并替换
 import { test } from "node:test";

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // prober 应用层终审单测：不连真实网络，只校验判定函数
 import { test } from "node:test";

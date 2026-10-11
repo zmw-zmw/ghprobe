@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 zmw
 // DoH 联邦解析：RFC 8484 wire format，端点 IP 直连，无任何 UDP53 路径
 import https from "node:https";
