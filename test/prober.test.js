@@ -140,8 +140,8 @@ test("sigFor: 代码里的 DOMAIN_SIG 优先于默认判据", () => {
 });
 
 test("sigFor: 配置里的 fallbackSigs 覆盖代码判据（替身域名自带判据）", () => {
-  const cfg = { fallbackSigs: { "ghproxy.net": { path: "/https://raw.githubusercontent.com/x/y/master/z", mustContain: ["Linux kernel"] } } };
-  const sig = sigFor("ghproxy.net", cfg);
+  const cfg = { fallbackSigs: { "mirror.example.net": { path: "/https://raw.githubusercontent.com/x/y/master/z", mustContain: ["Linux kernel"] } } };
+  const sig = sigFor("mirror.example.net", cfg);
   assert.equal(sig.path, "/https://raw.githubusercontent.com/x/y/master/z");
   assert.deepEqual(sig.mustContain, ["Linux kernel"]);
   // 未声明的字段沿用默认值，不会因为覆盖而丢

@@ -130,14 +130,12 @@ networkCheck:
 # `/gh/<user>/<repo>@<ref>/<path>`，代理是 `/<完整原始 URL>`，写死在代码里就没法让用户自己加替身。
 #
 # 🔴 兜底域名本身也可能被封：实测 2026-10-11，`cdn.jsdelivr.net` 在当前网络下 TCP 连得上但 TLS 被掐
-#    （被识别的是 TLS ClientHello 的形态，不是 IP）。所以这里给**多个候选**，探测时挑当下能通的那个。
-# ⚠️ `ghproxy.net` / `gh-proxy.com` 是**第三方 GitHub 代理**：请求会经过它们的服务器。
-#    介意的话把这两条删掉，只留 `cdn.jsdelivr.net` 即可。
+#    （被识别的是 TLS ClientHello 的形态，不是 IP）。多候选机制就是为这种情况准备的。
+# 🔴 默认只保留公共 CDN：**不预置任何第三方代理 / 镜像域名**——本工具定位「无代理」，
+#    预置代理域名既与该定位矛盾，也有法律风险。需要更多兜底请自行添加（示例见 README 第 6 节）。
 fallbacks:
   raw.githubusercontent.com:
     - cdn.jsdelivr.net
-    - { domain: ghproxy.net,  path: "/https://raw.githubusercontent.com/torvalds/linux/master/README", mustContain: ["Linux kernel"] }
-    - { domain: gh-proxy.com, path: "/https://raw.githubusercontent.com/torvalds/linux/master/README", mustContain: ["Linux kernel"] }
 
 # 超时：tcpMs 只管 TCP 握手阶段（死 IP 快速淘汰），握手成功后自动切到 tlsMs。
 # 黑洞 IP 会一直挂到超时，所以这两段必须分开 —— 否则每加一个候选都要多等 tlsMs。

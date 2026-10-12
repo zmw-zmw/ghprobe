@@ -161,7 +161,7 @@ The last layer needs its own explanation, because it is the most easily misunder
 **Same IP, same hostname, only the client changes — and the success rate drops from 100% to 15%.** So the block keys on the **shape of the TLS ClientHello** (extension list, order, length) — not on the hostname itself, and not on the IP. Two consequences:
 
 1. **Changing the IP cannot fix it** — only changing the domain can. That is why there is a **fallback chain**
-   with **several alternative candidates** (the fallbacks get blocked too): see section 6.
+   (public CDN only by default, extensible): see section 6.
 2. **This tool's probe results do not fully represent your experience** — ghprobe is Node, and its TLS fingerprint differs from your browser's. Measured: `raw.githubusercontent.com` opens fine in a browser, while the Node probe gets `ECONNRESET` on every candidate. In that case the tool writes `# blocked` (not `# absent`), meaning **inconclusive** rather than "unreachable":
 
    ```text
@@ -479,7 +479,7 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 ---
 
-## 6. The fallback chain: why cdn.jsdelivr.net / ghproxy.net show up in hosts
+## 6. The fallback chain: why cdn.jsdelivr.net shows up in hosts
 
 Besides the primary domains like `github.com`, ghprobe maintains a **fallback chain** for
 hostname-blocked domains: when every primary candidate is dead, it probes alternative entry
@@ -493,22 +493,21 @@ entry domain** will. GitHub file content has several equivalent entry points:
 ```text
 raw.githubusercontent.com/<user>/<repo>/<ref>/<path>   <- the original (often blocked)
 cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         <- jsDelivr public CDN, same content
-ghproxy.net/https://raw.githubusercontent.com/<...>    <- third-party GitHub proxy
 ```
 
-**Why several candidates**: the fallback domains get blocked too. Measured at the same moment:
-`cdn.jsdelivr.net` accepted TCP but had its TLS handshake cut. So the config ships a set of
-candidates and the probe **picks whichever works right now** (if several work, all are written
-and the client chooses). Three by default:
+**Why only one by default**: fallback domains get blocked too (measured at the same moment:
+`cdn.jsdelivr.net` accepted TCP but had its TLS handshake cut), so the chain **supports
+multiple candidates**; but the default ships only the public CDN `cdn.jsdelivr.net` —
+**ghprobe presets no third-party proxy or mirror domains** (e.g. `ghproxy.net` /
+`gh-proxy.com`): with those, "your requests go through their server", which contradicts
+this tool's "no proxy" positioning and carries legal risk. Add your own if you need more
+(how-to below):
 
 | Fallback | Type | Note |
 | --- | --- | --- |
 | `cdn.jsdelivr.net` | jsDelivr public CDN (Cloudflare) | path mapping `/gh/<user>/<repo>@<ref>/<path>` |
-| `ghproxy.net` | third-party GitHub proxy | your requests go through their server |
-| `gh-proxy.com` | third-party GitHub proxy | same |
 
-> **A third-party proxy can see which files you requested.** Delete those two if that bothers
-> you and keep only `cdn.jsdelivr.net`.
+> Any third-party fallback domain you add yourself is your own judgement and risk.
 
 Behaviour and prerequisites:
 
@@ -586,7 +585,7 @@ The task registered by `install` uses `LogonType = Interactive`, so it won't fir
 
 ### Disclaimer
 
-This tool performs DNS preference selection and connectivity probing only. It does **not** provide, include, or assist with any proxy, tunnel, traffic forwarding, or network-control evasion capability. You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
+This tool performs DNS preference selection and connectivity probing only. It implements and runs no proxy, tunnel, or traffic forwarding itself, and presets no third-party proxy or mirror domains in its default config (the fallback chain defaults to the public CDN `cdn.jsdelivr.net`; any other fallback must be added by the user, at their own risk). You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
 
 ---
 

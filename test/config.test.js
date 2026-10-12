@@ -90,13 +90,13 @@ test("normalizeFallbacks: 完整写法抽出 domain 与判据", () => {
     fallbacks: {
       "raw.githubusercontent.com": [
         "cdn.jsdelivr.net",
-        { domain: "ghproxy.net", path: "/https://raw.githubusercontent.com/torvalds/linux/master/README", mustContain: ["Linux kernel"] },
+        { domain: "mirror.example.net", path: "/https://raw.githubusercontent.com/torvalds/linux/master/README", mustContain: ["Linux kernel"] },
       ],
     },
   });
-  assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "ghproxy.net"]);
-  assert.equal(cfg.fallbackSigs["ghproxy.net"].path, "/https://raw.githubusercontent.com/torvalds/linux/master/README");
-  assert.deepEqual(cfg.fallbackSigs["ghproxy.net"].mustContain, ["Linux kernel"]);
+  assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "mirror.example.net"]);
+  assert.equal(cfg.fallbackSigs["mirror.example.net"].path, "/https://raw.githubusercontent.com/torvalds/linux/master/README");
+  assert.deepEqual(cfg.fallbackSigs["mirror.example.net"].mustContain, ["Linux kernel"]);
   assert.equal(cfg.fallbackSigs["cdn.jsdelivr.net"], undefined);
 });
 
@@ -112,14 +112,12 @@ test("normalizeFallbacks: 缺 fallbacks 段时不炸", () => {
   assert.deepEqual(cfg.fallbackSigs, {});
 });
 
-test("loadConfig: 默认配置的 raw 兜底有多个候选且带判据", () => {
+test("loadConfig: 默认配置的 raw 兜底只含公共 CDN，不预置第三方代理", () => {
   const cfg = loadConfig();
   const list = cfg.fallbacks["raw.githubusercontent.com"];
-  assert.ok(list.length >= 2, "应给多个候选（单个被封时还有备选）");
   assert.ok(list.includes("cdn.jsdelivr.net"));
-  // 代理型替身自带判据
-  assert.ok(cfg.fallbackSigs["ghproxy.net"], "代理型替身必须自带 path/mustContain");
-  assert.ok(cfg.fallbackSigs["ghproxy.net"].path.startsWith("/https://"));
+  assert.equal(cfg.fallbackSigs["ghproxy.net"], undefined, "默认不得预置第三方代理域名");
+  assert.equal(cfg.fallbackSigs["gh-proxy.com"], undefined, "默认不得预置第三方代理域名");
 });
 
 // ============================================================================
@@ -148,9 +146,9 @@ test("mergeThreeWay: 用户值 == 快照值 -> 用新默认（关键用例）", 
   // 用户没动过 fallbacks；默认里给它加了两个候选 -> 老用户应该拿到
   const snap = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net"] } };
   const user = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net"] } };
-  const def = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net", "ghproxy.net", "gh-proxy.com"] } };
+  const def = { fallbacks: { "raw.githubusercontent.com": ["cdn.jsdelivr.net", "mirror-a.example.net", "mirror-b.example.net"] } };
   const out = mergeThreeWay(def, user, snap);
-  assert.deepEqual(out.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "ghproxy.net", "gh-proxy.com"]);
+  assert.deepEqual(out.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net", "mirror-a.example.net", "mirror-b.example.net"]);
 });
 
 test("mergeThreeWay: 用户值 != 快照值 -> 保留用户值（不覆盖自定义）", () => {
@@ -217,8 +215,8 @@ test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）",
 
     const cfg = loadConfig();
     assert.equal(cfg.schedule.healthMin, 9, "用户改过的键保留");
-    // 没改过的键（兜底候选）应跟随当前默认
-    assert.ok(cfg.fallbacks["raw.githubusercontent.com"].length >= 2);
+    // 没改过的键（兜底候选）应跟随当前默认：只剩公共 CDN，不预置第三方代理
+    assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net"]);
   } finally {
     process.env.LOCALAPPDATA = orig;
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }

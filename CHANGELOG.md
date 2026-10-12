@@ -5,6 +5,20 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3] - 2026-10-12
+
+### Changed
+
+- **默认配置不再预置任何第三方代理域名**（`ghproxy.net` / `gh-proxy.com` 已从 `fallbacks` 移除）：
+  本工具定位「无代理」，默认预置第三方代理既与该定位矛盾，也有法律风险。
+  默认兜底只保留公共 CDN `cdn.jsdelivr.net`；多候选与自带判据机制保留，用户可自行添加替身。
+- README（中英）第 6 节、§3 边界、免责声明同步收紧：明确「不预置任何第三方代理 / 镜像域名」。
+
+### Upgrade
+
+- 三方合并会把新默认带给**没动过** `fallbacks` 的用户；动过的保留原值。
+  老用户配置里若残留 `ghproxy.net` / `gh-proxy.com`，`ghprobe config-diff` 可见，自行删除即可。
+
 ## [0.1.2] - 2026-10-11
 
 ### Added
