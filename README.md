@@ -460,7 +460,7 @@ fallbacks:
   raw.githubusercontent.com: [cdn.jsdelivr.net]
 
 timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
-probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10 }
+probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10, schannelRetry: true, stableSamples: 2 }
 hosts: { maxEntriesPerDomain: 2 }
 serve: { host: 127.0.0.1, port: 8930 }
 schedule:
