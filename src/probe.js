@@ -3,7 +3,7 @@
 // 一轮完整探测：DoH 候选 + 内置池 -> 三关并发探测 -> 排名 -> 兜底轮
 import { resolveAll } from "./doh.js";
 import { probeIp, pool } from "./prober.js";
-import { rank, neededFallbacks } from "./ranker.js";
+import { rank, neededFallbacks, mergeSamples } from "./ranker.js";
 
 // 该域名该用哪些内置池。
 // 默认（未配 domainPools 或配了不存在的池名）用全部池 —— 保持「与域名无关地全量进候选」
@@ -59,8 +59,21 @@ export async function runProbe(cfg, log, onlyDomains = null) {
   const directFb = want ? [...want].filter((d) => fbDomains.includes(d) && !cfg.domains.includes(d)) : [];
 
   const resolved = await resolveCandidates(cfg, mainDomains, say);
-  const all = await pool(jobsOf(cfg, resolved), cfg.probe.concurrency);
-  const ranked = rank(all, cfg);
+  let all = await pool(jobsOf(cfg, resolved), cfg.probe.concurrency);
+  let ranked = rank(all, cfg);
+
+  // 复测抗抖动（0.3.0）：对每域名当前前 3 名各再采一枪，均值 + 失败罚分后重排名。
+  // 代价极小（≤24 个快候选、约 1~2s），换来「写进 hosts 的第一名是真的稳」——
+  // 单采样时同一 IP 相邻两轮分差可达数倍，排名近乎随机，而无谓的换 IP 要刷 DNS 缓存。
+  if ((cfg.probe.stableSamples ?? 2) >= 2) {
+    const jobs = [];
+    for (const [, rs] of ranked) {
+      for (const r of rs.slice(0, 3)) { jobs.push(() => probeIp(r.domain, r.ip, cfg)); }
+    }
+    const second = await pool(jobs, cfg.probe.concurrency);
+    all = mergeSamples(all, second);
+    ranked = rank(all, cfg);
+  }
 
   // 兜底轮：主域名全灭且配了替身 -> 探测替身域名
   const extra = new Map();

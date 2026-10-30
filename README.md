@@ -169,7 +169,12 @@ ghprobe 的取舍是：**只做「优选 IP + 自动维护」，不碰系统网�
    # blocked raw.githubusercontent.com 2026-10-11T10:27:09.367Z
    ```
 
-   两种标记的区别：`# absent` = 探过、确实没有可用 IP；`# blocked` = 本机探测客户端被识别，你的浏览器很可能照样能用。
+   两种标记的区别：`# absent` = 探过、确实没有可用 IP；`# blocked` = 探测客户端 TLS 被识别，你的浏览器很可能照样能用。
+
+   > **0.3.0 起**：Node 被 reset 后会用 Windows 自带的 `curl.exe`（Schannel 构建，
+   > **与 Edge 同一 TLS 栈**）重探一次（`probe.schannelRetry`，默认开）。重探通过 →
+   > 正常写进 hosts；重探仍被 reset → `# blocked` 才落笔，此时它意味着
+   > 「**浏览器同款栈验证过确实被拦**」，不再是客户端指纹的假阴性。
 
 **要解决第四层**需要包级手法（TTL 操纵、伪包、TCP 层 desync），那必须装内核驱动（类似 GoodbyeDPI 那类工具）。这跟本项目「不装驱动、不改系统网络路径」的取舍直接冲突，所以**刻意不做**。本工具的定位是：**在你现有的网络条件下，把 IP 选对、并持续维护**。
 
@@ -429,11 +434,13 @@ ipPools:
 domainPools:
   github.com: [auto, seed, azure]
   api.github.com: [auto, seed]
+  ssh.github.com: [auto, seed]
   codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]
   gist.githubusercontent.com: [fastly]
   avatars.githubusercontent.com: [fastly]
+  github.githubassets.com: [ghassets]
 
 poolUpdate:
   enabled: true

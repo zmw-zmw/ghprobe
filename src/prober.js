@@ -4,6 +4,11 @@
 // 证书校验拦的是 DNS 污染，应用层终审拦的是共享 CDN 上未部署该域名的"假活"IP
 import tls from "node:tls";
 import https from "node:https";
+import net from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFile } from "node:child_process";
 
 // 目标域名的应用层指纹：真实业务路径、必须包含的响应特征、允许状态码、拒绝特征、允许跳转的 host
 // 路径必须能代表真实业务；codeload 用归档下载路径，避免根路径 301 到 github.com 主站骗过校验
@@ -36,6 +41,21 @@ export const DOMAIN_SIG = {
     reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["github.com"],
   },
+  // github.githubassets.com：github.com 网页的全部 JS/CSS/字体都从这里加载（0.3.0 新增）。
+  // 它不写进 hosts 时「页面能打开但样式全裂」，是直连浏览最常见的体验杀手。
+  // 判据用 favicon（2026-10-31 实测 4 个 Fastly .215 IP 全部 200 且以 `<svg` 开头）；
+  // 注意它的 Fastly 段是 185.199.108-111.**215**，与 githubusercontent 系的 .133 不同段
+  // （.133 对该 SNI 直接连接失败），所以 domainPools 走独立的 ghassets 池。
+  "github.githubassets.com": {
+    path: "/favicons/favicon.svg",
+    mustContain: ["<svg"],
+    allow: [200, 204],
+    reject: ["unknown domain", "Fastly error", "bad request"],
+    redirectHosts: [],
+  },
+  // ssh.github.com：SSH-over-443 端点（git clone git@ssh.github.com:... 用，0.3.0 新增）。
+  // type:"ssh" —— 不走 TLS/HTTP 三关，改探 SSH banner（见 sshProbe）。
+  "ssh.github.com": { type: "ssh" },
   "codeload.github.com": {
     path: "/torvalds/linux/tar.gz/refs/heads/master",
     mustContain: [],
@@ -99,17 +119,113 @@ function badRedirect(statusCode, location, sig) {
 //    十几条死候选就是几十秒 —— 池子因此不敢放宽，进而出现「明明有活 IP 却报 stuck」。
 //    这里先按 tcpMs 计，握手成功（connect 事件）后再把超时切到 tlsMs：
 //    快速淘汰死 IP，同时不误杀「连得上但 TLS 慢」的活 IP。
-function tcpTlsProbe(ip, domain, tcpMs, tlsMs) {
+function tcpTlsProbe(ip, domain, tcpMs, tlsMs, port = 443) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     let tcpCost = -1;
     let stage = "tcp";
-    const sock = tls.connect({ host: ip, port: 443, servername: domain, rejectUnauthorized: true });
+    const sock = tls.connect({ host: ip, port, servername: domain, rejectUnauthorized: true });
     const done = (r) => { try { sock.destroy(); } catch { /* 已销毁 */ } resolve(r); };
     sock.setTimeout(tcpMs, () => done({ ok: false, stage, err: "timeout" }));
     sock.on("connect", () => { tcpCost = Date.now() - t0; stage = "tls"; sock.setTimeout(tlsMs); });
     sock.on("secureConnect", () => done({ ok: true, tcpMs: tcpCost, tlsMs: Date.now() - t0 }));
     sock.on("error", (e) => done({ ok: false, stage, err: String(e.code || e.message).slice(0, 60) }));
+  });
+}
+
+// SSH banner 探测（type:"ssh" 的域名走这条，如 ssh.github.com 的 SSH-over-443）：
+// 服务端**先**发 banner（SSH-2.0-...），客户端 TLS/HTTP 三关都不适用 —— 读到合法 banner 即活。
+// 超时复用 tcpMs：SSH banner 在 TCP 建连后立刻到，不需要单独一档。
+export function parseSshBanner(buf) {
+  const s = String(buf.slice(0, 255));
+  const nl = s.indexOf("\r\n");
+  if (nl === -1) { return null; }
+  const line = s.slice(0, nl);
+  return /^SSH-\d\.\d-.+\r?$/.test(line) ? line : "";
+}
+
+export function sshProbe(ip, tcpMs, port = 443) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let tcpCost = -1;
+    let settled = false;
+    let acc = Buffer.alloc(0);
+    const sock = net.connect({ host: ip, port });
+    const done = (r) => {
+      if (settled) { return; }
+      settled = true;
+      try { sock.destroy(); } catch { /* 已销毁 */ }
+      resolve(r);
+    };
+    sock.setTimeout(tcpMs, () => done({ ok: false, stage: tcpCost < 0 ? "tcp" : "banner", err: "timeout" }));
+    sock.on("connect", () => { tcpCost = Date.now() - t0; });
+    sock.on("data", (c) => {
+      acc = Buffer.concat([acc, c]);
+      const banner = parseSshBanner(acc);
+      if (banner) { done({ ok: true, tcpMs: tcpCost, banner: banner.slice(0, 48), err: "" }); }
+      else if (banner === "") { done({ ok: false, stage: "banner", err: "not ssh" }); }
+      else if (acc.length >= 255) { done({ ok: false, stage: "banner", err: "not ssh" }); }
+    });
+    sock.on("timeout", () => done({ ok: false, stage: tcpCost < 0 ? "tcp" : "banner", err: "timeout" }));
+    sock.on("error", (e) => done({ ok: false, stage: tcpCost < 0 ? "tcp" : "banner", err: String(e.code || e.message).slice(0, 60) }));
+    sock.on("close", () => done({ ok: false, stage: tcpCost < 0 ? "tcp" : "banner", err: "closed" }));
+  });
+}
+
+// 🔴 schannel 二次探测：Node 的 TLS ClientHello 形态会被中间设备识别并 RST（README §3 实测：
+//    同一 IP 同一时刻 openssl 20/20、Node 5/20、浏览器正常）。Windows 10+ **自带**的
+//    curl.exe 是 Schannel 构建 —— 与 Edge 同一 TLS 栈，指纹与浏览器一致。
+//    被节点侧 TLS 阻断的候选用它重探一次：能给出「与浏览器一致」的真实判定，
+//    而不是把「浏览器明明能用」的域名写成 # blocked。
+// 🔴 必须显式定位 System32 的 curl.exe：PATH 里排在前面的可能是 Git 自带的 OpenSSL 构建
+//    （实测 mingw64 curl 走 OpenSSL，指纹又变回去了）。找不到就返回 null，退回旧行为。
+export function findSystemCurl() {
+  if (process.platform !== "win32") { return ""; }
+  const p = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "curl.exe");
+  return fs.existsSync(p) ? p : "";
+}
+
+// 一次 schannel 探测：curl --resolve 把域名钉到候选 IP，-m 限时。
+// 返回 { ok, status, tlsMs, ttfb, err }；连接层失败（含 TLS 被 reset）status=-1。
+// opts = { exec, curl, port } 可注入（单测不打真网络）。
+export function curlSchannelProbe(ip, domain, cfg, opts = {}) {
+  const curl = opts.curl ?? findSystemCurl();
+  if (!curl) { return Promise.resolve(null); }
+  const exec = opts.exec || execFile;
+  const sig = sigFor(domain, cfg);
+  const httpMs = Math.max(2000, cfg.timeouts.httpMs);
+  const port = opts.port ?? 443;
+  return new Promise((resolve) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ghprobe-curl-"));
+    const body = path.join(dir, "body");
+    exec(curl, [
+      "-sS", "-o", body, "--resolve", `${domain}:${port}:${ip}`,
+      "-m", String(Math.round(httpMs / 1000)),
+      "-w", "%{http_code} %{time_appconnect} %{time_starttransfer}",
+      `https://${domain}:${port}${sig.path}`,
+    ], { timeout: httpMs + 4000, windowsHide: true }, (e, stdout, stderr) => {
+      let out = { ok: false, status: -1, tlsMs: -1, ttfb: -1, err: "" };
+      if (e) {
+        const msg = String(stderr || e.message).trim().split(/\r?\n/)[0].slice(0, 60);
+        out = { ok: false, status: -1, tlsMs: -1, ttfb: -1, err: `schannel:${msg || "failed"}` };
+      } else {
+        const parts = String(stdout).trim().split(/\s+/);
+        const statusCode = Number(parts[0]) || -1;
+        let bodyText = "";
+        try { bodyText = fs.readFileSync(body, "utf8").slice(0, 4096); } catch { /* 空响应体 */ }
+        const checked = checkHttpResponse(statusCode, bodyText, "", sig);
+        // 跳转校验弱化：curl 未跟随跳转、也没取回 Location 头，3xx 交给 allow 列表判。
+        // 只在 TLS 已经通过 schannel 之后才会走到这，风险可接受（README §3 的假活是 HTTP 层的）。
+        out = {
+          ok: checked.ok, status: statusCode,
+          tlsMs: Math.round(Number(parts[1]) * 1000) || -1,
+          ttfb: Math.round(Number(parts[2]) * 1000) || -1,
+          err: checked.ok ? "" : `http:${checked.err}`,
+        };
+      }
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 清理失败不管 */ }
+      resolve(out);
+    });
   });
 }
 
@@ -170,12 +286,12 @@ export function sigFor(domain, cfg) {
 }
 
 // 第三关：HTTP GET（host=IP、SNI=域名、Host头=域名），读少量响应体做终审
-function httpProbe(ip, domain, httpMs, cfg) {
+function httpProbe(ip, domain, httpMs, cfg, port = 443) {
   return new Promise((resolve) => {
     const sig = sigFor(domain, cfg);
     const t0 = Date.now();
     const req = https.request({
-      host: ip, servername: domain, method: "GET", path: sig.path, timeout: httpMs,
+      host: ip, port, servername: domain, method: "GET", path: sig.path, timeout: httpMs,
       headers: { Host: domain, "user-agent": "ghprobe/0.1.0", accept: "*/*" },
     }, async (res) => {
       const ttfb = Date.now() - t0;
@@ -207,15 +323,49 @@ export function looksLikeTlsBlocked(failure) {
   return RESET_RE.test(err) || err === "timeout";
 }
 
-// 探测单个 (域名, IP)：三关全过才算活；分数越小越优
-export async function probeIp(domain, ip, cfg) {
+// 探测单个 (域名, IP)：三关全过才算活；分数越小越优。
+// deps = { curlProbe, port } 可注入（单测把 port 指到本地服务，不打真网络），
+// 缺省 curlProbe 用 curlSchannelProbe、端口 443。
+// 两条扩展路径：
+//   ① type:"ssh" 的域名（ssh.github.com）不跑 TLS/HTTP 三关，读 SSH banner 判活；
+//   ② TLS 阶段被指纹阻断时（TCP 通、TLS 被 reset），用 Windows 自带 curl（schannel，
+//      与浏览器同一 TLS 栈）重探一次 —— 0.3.0 前这种情况只能写 # blocked 放弃，
+//      而「浏览器明明能用」的域名就这样被误判成不可达。重探也失败时：
+//      HTTP 层有响应 = TLS 其实通了（假活，不是指纹问题，不标 blocked）；
+//      连接层仍失败 = 连浏览器同款栈都过不去，才是真被阻断。
+export async function probeIp(domain, ip, cfg, deps = {}) {
   const { tlsMs, httpMs } = cfg.timeouts;
   const tcpMs = cfg.timeouts.tcpMs ?? tlsMs; // 老配置没这一项时退回 tlsMs，行为不变
-  const g = await tcpTlsProbe(ip, domain, tcpMs, tlsMs);
+  const port = deps.port ?? 443;
+  const sig = sigFor(domain, cfg);
+
+  if (sig.type === "ssh") {
+    const g = await sshProbe(ip, tcpMs, port);
+    return g.ok
+      ? { domain, ip, ok: true, tcpMs: g.tcpMs, tlsMs: g.tcpMs, ttfb: g.tcpMs, status: 0, score: g.tcpMs, banner: g.banner, err: "", via: "ssh" }
+      : { domain, ip, ok: false, stage: g.stage, err: g.err };
+  }
+
+  const g = await tcpTlsProbe(ip, domain, tcpMs, tlsMs, port);
   if (!g.ok) {
+    if (looksLikeTlsBlocked(g) && cfg.probe?.schannelRetry !== false) {
+      const s = await (deps.curlProbe || curlSchannelProbe)(ip, domain, cfg, { port });
+      if (s) {
+        if (s.ok) {
+          const tcp = g.tcpMs >= 0 ? g.tcpMs : s.tlsMs;
+          const tlsCost = s.tlsMs > 0 ? s.tlsMs : 0;
+          const score = Math.round(tcp * 0.4 + tlsCost * 0.4 + (s.ttfb > 0 ? s.ttfb : httpMs) * 0.2);
+          return {
+            domain, ip, ok: true, tcpMs: tcp, tlsMs: tcp + tlsCost,
+            ttfb: s.ttfb, status: s.status, score, via: "schannel", err: "",
+          };
+        }
+        return { domain, ip, ok: false, stage: s.status > 0 ? "http" : "tls", err: s.err, tlsBlocked: !(s.status > 0), via: "schannel" };
+      }
+    }
     return { domain, ip, ok: false, stage: g.stage, err: g.err, tlsBlocked: looksLikeTlsBlocked(g) };
   }
-  const h = await httpProbe(ip, domain, httpMs, cfg);
+  const h = await httpProbe(ip, domain, httpMs, cfg, port);
   const tlsCost = g.tlsMs - g.tcpMs;
   const score = Math.round(g.tcpMs * 0.4 + tlsCost * 0.4 + (h.ok ? h.ttfb : httpMs) * 0.2);
   return {

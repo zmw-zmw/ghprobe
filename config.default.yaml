@@ -10,16 +10,22 @@
 #    所以升级后不需要手动同步配置。想看有哪些差异：`ghprobe config-diff`。
 #    （本文件里的注释只是说明，不参与合并 —— 合并看的是键值。）
 # 目标域名族：每域名独立探测、独立写 hosts
-# api.github.com（0.2.0 新增）：gh CLI / REST API 走它，DNS 同样被污染 —— 写进 hosts 后
-# `gh api` / `curl https://api.github.com` 直连可用；候选走 seed/auto 池（GitHub 自租段）
+# api.github.com（0.2.0）：gh CLI / REST API 走它，DNS 同样被污染 —— 写进 hosts 后
+#   `gh api` / `curl https://api.github.com` 直连可用；候选走 seed/auto 池（GitHub 自租段）
+# github.githubassets.com（0.3.0）：github.com 网页的全部 JS/CSS/字体都从这里加载 ——
+#   不写它「页面能开但样式全裂」。注意其 Fastly 段是 .215，与 githubusercontent 的 .133 不同
+# ssh.github.com（0.3.0）：SSH-over-443（git clone git@ssh.github.com:... 用），
+#   探测方式是读 SSH banner，不走 TLS/HTTP 三关
 domains:
   - github.com
   - api.github.com
+  - ssh.github.com
   - codeload.github.com
   - objects.githubusercontent.com
   - raw.githubusercontent.com
   - gist.githubusercontent.com
   - avatars.githubusercontent.com
+  - github.githubassets.com
 
 # DoH 端点（全部 IP 直连，绕开解析 DoH 域名的死锁；默认只放国内实测可达端点）
 # sni 填服务域名：TLS 握手按它验证书（RFC 6066 不允许拿 IP 当 SNI）
@@ -48,6 +54,10 @@ ipPools:
     - 140.82.121.3
   # Fastly 段：服务 githubusercontent 系（raw / objects / gist / avatars），多年不变
   fastly: [185.199.108.133, 185.199.109.133, 185.199.110.133, 185.199.111.133]
+  # Fastly ghassets 段（0.3.0 新增）：github.githubassets.com 专用。
+  # 🔴 与上面 .133 不是同一段：实测 .133 对 github.githubassets.com 的 SNI 连不上，
+  #    DoH 对该域名返回的也是 .215 —— 两段不能混用，所以单独建池。
+  ghassets: [185.199.108.215, 185.199.109.215, 185.199.110.215, 185.199.111.215]
   # GitHub 自租段：服务 github.com / codeload.github.com 主站。
   # 🔴 2026-10 实测：这些 IP **在分钟级抖动** —— 同一批 IP 几分钟前全灭、现在 9/20 可用，
   #    且「活的是哪几个」每次都不一样。所以池子必须宽（靠 tcpMs 短超时兜住成本），
@@ -90,11 +100,13 @@ ipPools:
 domainPools:
   github.com: [auto, seed, azure]
   api.github.com: [auto, seed]
+  ssh.github.com: [auto, seed]
   codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]
   gist.githubusercontent.com: [fastly]
   avatars.githubusercontent.com: [fastly]
+  github.githubassets.com: [ghassets]
 
 # 候选池自动更新：从 GitHub 官方 api.github.com/meta 拉最新网段，缓存到用户目录，供 `auto` 池使用。
 # 为什么需要：GitHub 的 Azure 段在变，内置 azure 池会过期（实测 24 个里 4 个已失效）。
@@ -150,6 +162,15 @@ probe:
   maxPoolIps: 32     # 内置池每域名最多补几个。**与 DoH 各自限额，不共享总上限**（见 probe.js）
   maxPerDomain: 4    # 每域名最多保留几个可用 IP（前 maxEntriesPerDomain 个会写进 hosts）
   concurrency: 10    # 全局同时握手的 socket 上限（跨域名共享）
+  # schannel 二次重探（0.3.0）：Node 的 TLS ClientHello 被中间设备识别并 reset 时
+  # （README §3 实测：同一 IP 同一时刻 openssl 20/20、Node 5/20、浏览器正常），
+  # 改用 Windows 自带的 curl.exe（Schannel 构建，与 Edge 同一 TLS 栈）重探一次。
+  # 0.3.0 前这种情况只能写 # blocked 放弃，而浏览器明明能用 —— 这是假阴性的根治。
+  schannelRetry: true
+  # 复测抗抖动（0.3.0）：对每域名前 3 名再采一枪，均值 + 失败罚分后重排名。
+  # 单采样时同一 IP 相邻两轮分差可达数倍、排名近乎随机，而无谓的换 IP 要刷 DNS 缓存。
+  # 2 = 总采样两次（默认，代价 ~1-2s）；1 或删掉 = 退回单采样旧行为。
+  stableSamples: 2
 # hosts 写入：每域名写几条候选。
 # 🔴 2026-10-11 实测推翻旧假设「Windows 同一域名只取第一条」—— hosts 里同名多条会被
 #    解析器**全部返回**（保持文件顺序），且 curl / 浏览器会**逐个尝试**：黑洞 IP 排在前

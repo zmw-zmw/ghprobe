@@ -170,6 +170,8 @@ The last layer needs its own explanation, because it is the most easily misunder
 
    `# absent` = probed, genuinely no usable IP. `# blocked` = the local probe client got fingerprinted; your browser may well work.
 
+   > **Since 0.3.0**: after a Node reset, ghprobe retries once with the built-in Windows `curl.exe` (Schannel build, **the same TLS stack as Edge**) — `probe.schannelRetry`, on by default. Retry succeeds → the entry is written to hosts normally. Retry also reset → only then is `# blocked` written, and it now means "**verified blocked with a browser-equivalent stack**", no longer a possible fingerprint false negative.
+
 **Fixing the fourth layer** requires packet-level techniques (TTL manipulation, decoy packets, TCP-layer desync), which need a kernel driver (tools like GoodbyeDPI). That directly conflicts with this project's "no driver, no system network path changes" trade-off, so it is **deliberately out of scope**. ghprobe's job is: **given the network you already have, pick the right IPs and keep them working.**
 
 ---
@@ -436,11 +438,13 @@ ipPools:
 domainPools:
   github.com: [auto, seed, azure]
   api.github.com: [auto, seed]
+  ssh.github.com: [auto, seed]
   codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]
   gist.githubusercontent.com: [fastly]
   avatars.githubusercontent.com: [fastly]
+  github.githubassets.com: [ghassets]
 
 poolUpdate:
   enabled: true

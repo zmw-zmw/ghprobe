@@ -5,6 +5,44 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-10-31
+
+### Added
+
+- **`github.githubassets.com` 加入默认域名族**：github.com 网页的全部 JS/CSS/字体都从这里
+  加载 —— 不写它「页面能打开但样式全裂」，是直连浏览最常见的体验杀手。
+  🔴 它的 Fastly 段是 `185.199.108-111.215`，与 githubusercontent 系的 `.133` **不同段**
+  （实测 `.133` 对该 SNI 直接连接失败），所以单独建 `ghassets` 池。
+  判据用 `GET /favicons/favicon.svg`（实测 4 个 .215 IP 全部 200 且以 `<svg` 开头）。
+- **`ssh.github.com` 加入默认域名族（SSH-over-443）**：`git clone git@ssh.github.com:...`
+  的入口，SNI 封锁下最稳的 SSH 通道。探测类型新增 `type:"ssh"`：服务端先发 banner，
+  读到合法 `SSH-2.0-*` 即活，不走 TLS/HTTP 三关（`sshProbe`）。
+- **schannel 二次重探**：Node 的 TLS ClientHello 被中间设备识别并 reset 时（README §3 实测：
+  同一 IP 同一时刻 openssl 20/20、Node 5/20、浏览器正常），改用 **Windows 自带的 curl.exe
+  （Schannel 构建，与 Edge 同一 TLS 栈）** 重探一次。为此 probeIp 的端口改为可注入。
+  重探结果的语义随之升级：
+  - schannel 通 → 写入 hosts（0.3.0 前这种情况只能写 `# blocked` 放弃，而浏览器明明能用）；
+  - schannel 后 HTTP 层仍 4xx → 假活，与指纹无关，不标 blocked；
+  - schannel 后连接层仍被 reset → **连浏览器同款栈都过不去**，`# blocked` 从此是
+    「浏览器栈验证过确实被拦」的强结论，不再可能是客户端指纹的假阴性。
+  🔴 必须显式定位 System32 的 curl.exe：PATH 前面的可能是 Git 自带的 OpenSSL 构建
+  （实测 mingw64 curl 走 OpenSSL，指纹又变回去）。
+- **排名双采样抗抖动**：对每域名前 3 名再采一枪，`mergeSamples` 按均值 + 失败罚分
+  （500ms/次）重排名。单采样时同一 IP 相邻两轮分差可达数倍、排名近乎随机，
+  而无谓的换 IP 要刷 DNS 缓存、断连接池 —— 排名稳比单次「最优」更重要。
+  `probe.stableSamples: 2`（默认开），设 1 退回旧行为。
+- 单元测试 166 → **178**（SSH banner 解析/探测、schannel 注入路径、双采样合并、
+  githubassets 判据；全部本地 socket 与注入替身，不打真网络）。
+
+### Live validation (2026-10-31, 真实网络)
+
+- 首轮 probe：`ssh.github.com` 经 banner 判活（20.205.243.160，54ms）；
+  `github.githubassets.com` 4 个 .215 全活（最优 score 36）；`api.github.com` /
+  `github.com`（双采样后 4 个可用）正常。
+- `raw/gist/avatars.githubusercontent.com`（.133 段）本轮全灭 —— schannel 重探同样被
+  connection reset，证实是网络层对该批 SNI 的真实封锁，**不是工具的指纹假阴性**；
+  工具如实标 blocked/absent 并走冷却，这正是设计行为。
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

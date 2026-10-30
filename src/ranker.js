@@ -28,3 +28,29 @@ export function neededFallbacks(ranked, cfg) {
   }
   return [...new Set(list)];
 }
+
+// 多次采样合并（纯函数）：把首轮结果与复测样本按 (domain, ip) 分组，
+//   · 有活样本 -> score = 活样本均值 + 每个失败样本罚 penaltyMs（抖动 IP 别排第一）
+//   · 全部失败 -> 保留失败结果（字段取首个，ok=false，供 blockedDomainsFromRaw 判读）
+// 为什么需要：单次采样抖动大时排名近乎随机 —— 而每次换 IP 都要刷 DNS 缓存、断连接池，
+// 排名稳比单次「最优」更重要。0.3.0 前工具排名单采样，实测同一 IP 相邻两轮分差可达数倍。
+export function mergeSamples(first, extra, penaltyMs = 500) {
+  const by = new Map();
+  const push = (r) => {
+    if (!r || !r.domain || !r.ip) { return; }
+    const k = `${r.domain}|${r.ip}`;
+    if (!by.has(k)) { by.set(k, []); }
+    by.get(k).push(r);
+  };
+  for (const r of first) { push(r); }
+  for (const r of extra) { push(r); }
+  const out = [];
+  for (const rs of by.values()) {
+    const ok = rs.filter((r) => r.ok);
+    if (!ok.length) { out.push({ ...rs[0], ok: false }); continue; }
+    const failed = rs.length - ok.length;
+    const avg = Math.round(ok.reduce((a, r) => a + r.score, 0) / ok.length);
+    out.push({ ...ok[0], ok: true, score: avg + failed * penaltyMs, samples: rs.length });
+  }
+  return out;
+}
