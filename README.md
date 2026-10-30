@@ -43,7 +43,7 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 
 **① 本地 DoH 解析，绕开系统 DNS 污染**
 
-候选 IP 不来自系统 DNS（可能被污染），而是走 DoH（RFC 8484 wire format，全程无 UDP/53 路径）。默认使用国内实测可达的端点：阿里 DNS（`223.5.5.5` / `223.6.6.6`）和 DNSPod（`1.12.12.12`）。
+候选 IP 不来自系统 DNS（可能被污染），而是走 DoH（RFC 8484 wire format，全程无 UDP/53 路径）。默认使用国内实测可达的端点：阿里 DNS（`223.5.5.5` / `223.6.6.6`）和 DNSPod（`1.12.12.12` / `120.53.53.53`）。
 
 关键细节：**DoH 端点用 IP 直连 + SNI 校验**。如果连 DoH 端点本身都要先解析它的域名，就会掉进「解析 DoH 域名又要先解析」的死锁；所以配置里端点写的是 IP，同时用 `sni` 字段填服务域名做证书校验（RFC 6066 不允许拿 IP 当 SNI），例如：
 
@@ -52,6 +52,7 @@ doh:
   - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
   - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
   - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
+  - { name: dnspod2, host: 120.53.53.53, sni: doh.pub,      path: /dns-query }
 ```
 
 多个端点并发查询，成功者取并集去重，再用内置 IP 池补一批候选。
@@ -350,6 +351,10 @@ ghprobe hosts
 ghprobe health
 ghprobe health --apply      # 检测到异常时写入系统 hosts（会弹 UAC）
 
+# 一键自检：网络 / DoH / 探测 / hosts / 计划任务，逐项人话结论 + 下一步建议
+# GitHub 连不上不知道哪坏了？先跑它。有 fail 项时退出码非零，方便脚本判断
+ghprobe doctor
+
 # 从 GitHub 官方 api.github.com/meta 更新候选池缓存（每天一次即可）
 # 该 API 未认证限 60 次/小时，所以别频繁调；health 到点也会自动调，一般不用手动
 ghprobe update-pool
@@ -423,6 +428,7 @@ ipPools:
 
 domainPools:
   github.com: [auto, seed, azure]
+  api.github.com: [auto, seed]
   codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]

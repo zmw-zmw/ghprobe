@@ -12,6 +12,7 @@ import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
 import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
 import { runHealth, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
+import { runDoctor, formatReport } from "../src/doctor.js";
 import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
 
@@ -75,6 +76,17 @@ function printSummary(r) {
     if (rs.length) { console.log(`[FBKP] ${domain} -> 兜底命中 ${rs[0].ip} (${rs[0].score})`); }
   }
 }
+
+program.command("doctor")
+  .description("一键自检：网络 / DoH / 探测 / hosts / 计划任务，人话结论 + 下一步建议")
+  .option("-c, --config <path>", "用户配置覆盖")
+  .action(async (opts) => {
+    const cfg = loadConfig(opts.config);
+    console.error("ghprobe 自检中（跑一轮完整探测，约 1 分钟）…");
+    const r = await runDoctor(cfg, (m) => console.error(m));
+    console.log(formatReport(r.checks));
+    if (!r.ok) { process.exitCode = 1; }
+  });
 
 program.command("probe")
   .description("跑一轮探测并输出结果（不写 hosts）")

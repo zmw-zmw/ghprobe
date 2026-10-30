@@ -5,6 +5,29 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-10-30
+
+### Added
+
+- **`ghprobe doctor` 一键自检**：把「本地网络 / DoH 解析 / 逐域名探测 / hosts 写入状态 /
+  计划任务」五层各查一遍，逐项给人话结论 + 下一步建议（如「跑 `ghprobe update-pool`」
+  「重跑 `ghprobe install`」）。定位：GitHub 连不上时，普通人不该被要求去读日志——
+  一条命令看懂哪层坏了、该做什么。有 fail 项时退出码非零，方便脚本消费；
+  `# blocked` 类域名只标 warn 不算失败（浏览器可能仍可用，不该吓退用户）。
+  评估逻辑拆成纯函数、编排依赖可注入，单测不打真网络。
+- **`api.github.com` 加入默认域名族**：gh CLI（`gh api`）与 REST API 直连提速。
+  DNS 同样被污染，此前 hosts 不管它。判据用 `GET /rate_limit`（未认证也返回 200，
+  响应体必含 `rate` 字段，不依赖网页特征）；候选走 seed/auto 池（GitHub 自租段）。
+  老用户升级后经三方合并自动获得该域名（没动过 `domains` 键的话）。
+- **DoH 端点增加 DNSPod 第二入口 `120.53.53.53`**（与 `1.12.12.12` 同证书 `doh.pub`）：
+  单端点抖动时解析不再整体失明。真实网络实测 4/4 端点可用。
+- 单元测试 153 → **166**。
+
+### Notes
+
+- `ghprobe serve` 的 HTTP API 保持不变（`POST /api/probe`、`GET /api/status`、
+  `GET /api/hosts`、`GET /api/config`），供脚本消费。
+
 ## [0.1.3] - 2026-10-12
 
 ### Changed

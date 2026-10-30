@@ -43,7 +43,7 @@ It provides **no** proxy, tunnel, traffic forwarding, or protocol evasion, and i
 
 **① Local DoH resolution, bypassing system-DNS poisoning**
 
-Candidates do not come from system DNS (which may be poisoned); they come over DoH (RFC 8484 wire format, with no UDP/53 path at all). The defaults are endpoints verified reachable from mainland China: Alibaba DNS (`223.5.5.5` / `223.6.6.6`) and DNSPod (`1.12.12.12`).
+Candidates do not come from system DNS (which may be poisoned); they come over DoH (RFC 8484 wire format, with no UDP/53 path at all). The defaults are endpoints verified reachable from mainland China: Alibaba DNS (`223.5.5.5` / `223.6.6.6`) and DNSPod (`1.12.12.12` / `120.53.53.53`).
 
 Key detail: **DoH endpoints are reached by IP directly, with SNI validation.** If reaching a DoH endpoint itself required resolving its hostname first, you would fall into the deadlock of "resolving the DoH hostname requires resolving first." So the config stores the endpoint's IP, and a `sni` field carries the service hostname for certificate validation (RFC 6066 forbids using an IP as SNI), for example:
 
@@ -357,6 +357,10 @@ ghprobe hosts
 ghprobe health
 ghprobe health --apply      # write to system hosts when a problem is detected (UAC prompt)
 
+# One-shot self-check: network / DoH / probing / hosts / scheduled task,
+# with a plain-language verdict and next-step hint for each item
+ghprobe doctor
+
 # Refresh the candidate pool from GitHub's official api.github.com/meta (once a day is enough)
 # That API is limited to 60 requests/hour unauthenticated, so don't call it often.
 # health also does this on schedule, so you rarely need it manually.
@@ -431,6 +435,7 @@ ipPools:
 
 domainPools:
   github.com: [auto, seed, azure]
+  api.github.com: [auto, seed]
   codeload.github.com: [auto, seed, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]

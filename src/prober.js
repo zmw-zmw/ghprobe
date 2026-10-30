@@ -19,6 +19,15 @@ import https from "node:https";
 //    → 规则：**路径 `/` 只接受 200/3xx**。只有那些「根路径本来就不存在合法内容」的域名
 //    （objects 根路径是 Varnish 的 404、gist 是 301）才保留 4xx，且靠 reject 词表兜底。
 export const DOMAIN_SIG = {
+  // api.github.com：gh CLI / REST API 走它，DNS 同样被污染。判据用 /rate_limit：
+  // 未认证也返回 200，响应体是 JSON 且必含 "rate" 字段 —— 不依赖 GitHub 网页特征
+  "api.github.com": {
+    path: "/rate_limit",
+    mustContain: ["rate"],
+    allow: [200, 204],
+    reject: ["unknown domain", "Fastly error", "bad request"],
+    redirectHosts: [],
+  },
   "github.com": {
     path: "/",
     mustContain: ["github"],
