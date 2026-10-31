@@ -36,10 +36,12 @@ test("detectActivity：注入 tasklist/foreground，前台命中浏览器名单�
     else { cb(null, acts.length === 0 ? "chrome" : "notepad", ""); acts.push(1); }
   };
   const cfg = { algorithm: { browsers: ["chrome"] } };
-  const a1 = await detectActivity(cfg, { exec });
+  // 🔴 platform 必须显式钉成 win32：detectActivity 在非 Windows 上直接短路，
+  //    ubuntu CI 里这个用例测的是检测逻辑本身（exec 已注入），不该被平台跳过
+  const a1 = await detectActivity(cfg, { exec, platform: "win32" });
   assert.equal(a1.running, true);
   assert.equal(a1.foreground, true);
-  const a2 = await detectActivity(cfg, { exec });
+  const a2 = await detectActivity(cfg, { exec, platform: "win32" });
   assert.equal(a2.running, true);
   assert.equal(a2.foreground, false, "前台是记事本不算在用浏览器");
   assert.equal(a2.otherForeground, undefined);
