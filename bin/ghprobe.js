@@ -11,8 +11,9 @@ import { loadConfig, ensureUserConfig, userConfigPath, userConfigSnapshotPath, c
 import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
 import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
-import { runHealth, blockFromProbeResult, shouldKeepOldBlock } from "../src/health.js";
-import { runDoctor, formatReport } from "../src/doctor.js";
+import { runHealth, blockFromProbeResult, shouldKeepOldBlock, parseBlock } from "../src/health.js";
+import { runDoctor, formatReport, queryTask } from "../src/doctor.js";
+import { runStatus } from "../src/status.js";
 import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
 
@@ -88,6 +89,15 @@ program.command("doctor")
     if (!r.ok) { process.exitCode = 1; }
   });
 
+program.command("status")
+  .description("秒级速查：hosts 现状 + 自愈日志尾部 + 计划任务（不打任何网络请求）")
+  .option("-c, --config <path>", "用户配置覆盖")
+  .action(async (opts) => {
+    const cfg = loadConfig(opts.config);
+    const r = await runStatus(cfg, { taskQuery: () => queryTask() });
+    console.log(r.lines.join("\n"));
+  });
+
 program.command("probe")
   .description("跑一轮探测并输出结果（不写 hosts）")
   .option("-c, --config <path>", "用户配置覆盖")
@@ -160,9 +170,13 @@ program.command("health")
     }
     // 到点先更新候选池（默认每天 1 次；成功失败同一档冷却，不会反复重试）。
     // 放最前：池子新了，后面的重排才有更宽的候选可用；更新成功后重新加载配置以吃进新池。
+    // 0.4.0 自救：把 hosts 里**当前已写入的条目**一并当种子 —— 它们刚通过三关终审，
+    // 是「当下确实能直连 GitHub」的 IP；seed 池被 SNI 整段封锁时这批 IP 往往是
+    // 唯一还拉得到 meta 的入口，池子不至于永久冻结。
     if (poolNeedsUpdate(cfg)) {
       try {
-        await updatePool(cfg, (m) => console.error(m));
+        const cur = parseBlock(fs.readFileSync(WIN_HOSTS, "utf8"));
+        await updatePool(cfg, (m) => console.error(m), [...cur.entries.values()]);
         cfg = loadConfig(opts.config);
       } catch (e) {
         console.error(`候选池更新失败（忽略，用现有池继续）: ${e.message}`);
@@ -274,7 +288,9 @@ program.command("update-pool")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
     try {
-      const r = await updatePool(cfg, (m) => console.error(m));
+      // 手动更新同样带上健康 hosts 条目当备用种子（见 health 命令里的说明）
+      const cur = parseBlock(fs.readFileSync(WIN_HOSTS, "utf8"));
+      const r = await updatePool(cfg, (m) => console.error(m), [...cur.entries.values()]);
       console.log(`候选池已更新：${r.count} 个 IP`);
       console.log(`  经 ${r.via} 拉取 -> ${r.path}`);
       console.log("下次 probe / health 会自动使用 auto 池");

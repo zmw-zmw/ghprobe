@@ -74,7 +74,11 @@ export const DOMAIN_SIG = {
     redirectHosts: ["objects.githubusercontent.com"],
   },
   "raw.githubusercontent.com": {
-    path: "/torvalds/linux/README.md",
+    // 🔴 路径必须带分支段（2026-10-31 实测修正）：raw.githubusercontent.com 的第 2 段是
+    //    分支名，`/torvalds/linux/README.md` 会被当作「README.md 分支」返回 404 ——
+    //    就算网络全通也会被判死（假阴性）。正确形态 `/torvalds/linux/master/README`
+    //    实测 200 且响应体含 "Linux kernel"（linux 仓库根文件本来就叫 README，无 .md）。
+    path: "/torvalds/linux/master/README",
     mustContain: ["Linux kernel"],
     allow: [200, 204, 302, 303, 304, 307, 308],
     reject: ["unknown domain", "Fastly error", "bad request"],
@@ -94,6 +98,9 @@ export const DOMAIN_SIG = {
     reject: ["unknown domain", "Fastly error", "bad request"],
     redirectHosts: ["avatars.githubusercontent.com"],
   },
+  // cdn.jsdelivr.net：0.4.0 起已从默认兜底链移除（2026-10-31 实测 SNI 级硬封：
+  // node + 双 curl 共 45 次全部在 ClientHello 后被 RST，换 IP/换 TLS 栈均无效）。
+  // 判据保留在这里：老用户配置里若仍引用它，探测依然有正确的业务路径可用。
   "cdn.jsdelivr.net": {
     path: "/gh/torvalds/linux@master/README",
     mustContain: ["Linux kernel"],

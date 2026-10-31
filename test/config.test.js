@@ -112,12 +112,14 @@ test("normalizeFallbacks: 缺 fallbacks 段时不炸", () => {
   assert.deepEqual(cfg.fallbackSigs, {});
 });
 
-test("loadConfig: 默认配置的 raw 兜底只含公共 CDN，不预置第三方代理", () => {
+test("loadConfig: 默认配置的 raw 兜底只含 jsDelivr 官方子域，不预置第三方代理", () => {
   const cfg = loadConfig();
   const list = cfg.fallbacks["raw.githubusercontent.com"];
-  assert.ok(list.includes("cdn.jsdelivr.net"));
+  // 0.4.0：cdn.jsdelivr.net 实测 SNI 硬封已移除；改为官方多 CDN 镜像，全部自带判据
+  assert.deepEqual(list, ["fastly.jsdelivr.net", "testingcf.jsdelivr.net", "gcore.jsdelivr.net"]);
   assert.equal(cfg.fallbackSigs["ghproxy.net"], undefined, "默认不得预置第三方代理域名");
   assert.equal(cfg.fallbackSigs["gh-proxy.com"], undefined, "默认不得预置第三方代理域名");
+  assert.equal(cfg.fallbackSigs["cdn.jsdelivr.net"], undefined, "已移除的默认兜底不再出现");
 });
 
 // ============================================================================
@@ -202,7 +204,7 @@ test("ensureUserConfig: 首次生成用户配置时同时写快照；二次调�
   }
 });
 
-test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）", () => {
+test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）", async () => {
   const orig = process.env.LOCALAPPDATA;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ghprobe-3way-"));
   process.env.LOCALAPPDATA = tmp;
@@ -215,8 +217,14 @@ test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）",
 
     const cfg = loadConfig();
     assert.equal(cfg.schedule.healthMin, 9, "用户改过的键保留");
-    // 没改过的键（兜底候选）应跟随当前默认：只剩公共 CDN，不预置第三方代理
-    assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], ["cdn.jsdelivr.net"]);
+    // 没改过的键（兜底候选）应跟随**当前包内默认**：直接读包内 config.default.yaml 对比，
+    // 而不是把某个版本的默认值写死在测试里（0.4.0 兜底链就换过一批）
+    const { fileURLToPath } = await import("node:url");
+    const yaml = (await import("js-yaml")).default;
+    const defPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "config.default.yaml");
+    const defCfg = normalizeFallbacks(yaml.load(fs.readFileSync(defPath, "utf8")));
+    assert.deepEqual(cfg.fallbacks["raw.githubusercontent.com"], defCfg.fallbacks["raw.githubusercontent.com"]);
+    assert.deepEqual(cfg.fallbackSigs["fastly.jsdelivr.net"], defCfg.fallbackSigs["fastly.jsdelivr.net"]);
   } finally {
     process.env.LOCALAPPDATA = orig;
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 忽略 */ }

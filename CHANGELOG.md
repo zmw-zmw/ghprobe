@@ -5,6 +5,46 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-10-31
+
+### Changed
+
+- **🔴 修正 `raw.githubusercontent.com` 探测判据路径（潜伏 bug）**：
+  `DOMAIN_SIG` 里的 `/torvalds/linux/README.md` 在真 GitHub 上是 **404** ——
+  raw 的第 2 段是分支名，无分支的路径会被当作「README.md 分支」。就算网络全通，
+  该判据也会把活 IP 判死（假阴性）。修正为 `/torvalds/linux/master/README`
+  （实测 200 且含 "Linux kernel"；linux 仓库根文件本来就叫 `README`，无 `.md`）。
+- **默认兜底链按实测数据重写**（jsDelivr 官方多 CDN，同一份内容、官方运营、无中间人）：
+
+  | 替身 | 2026-10-31 实测 |
+  | --- | --- |
+  | `fastly.jsdelivr.net`（新，首选） | Fastly anycast 151.101.x.229，node+双 curl 全栈全 IP **100%**，TTFB ~125ms |
+  | `testingcf.jsdelivr.net`（新） | Cloudflare 段，100%，与 Fastly 真正异构 |
+  | `gcore.jsdelivr.net`（新） | 100%，但当前与 testingcf 解析到同一对 CF IP，纯语义冗余 |
+  | ~~`cdn.jsdelivr.net`~~（移除） | **0/45**：TCP 全通、ClientHello 后即 RST（SNI 硬封），换 IP/换 TLS 栈均无效 |
+
+  三个替身都以**完整写法**入配置（自带 `/gh/torvalds/linux@master/README` + mustContain 判据，
+  它们不在代码 DOMAIN_SIG 里，简写会退回探根路径的弱判据）。
+  老用户没改过 `fallbacks` 的自动跟随新默认；改过的用 `ghprobe config-diff` 查看。
+
+### Added
+
+- **`ghprobe status` 秒级速查**：不打任何网络请求，汇总「hosts 块现状（每域名主 IP + 备选 +
+  缺失/阻断标记）+ 计划任务状态 + 自愈日志尾部」。与 doctor 的分工：日常「现在什么情况」用
+  status（<1s），坏了要诊断再用 doctor（~1 分钟）。
+- **候选池拉取自救**：`updatePool` 支持**健康 hosts 条目当备用种子**（排在静态 seed 之前）——
+  它们刚通过三关 + HTTP 终审，是「当下确实能直连 GitHub」的 IP；seed 池被 SNI 整段封锁时
+  这批 IP 往往是唯一还拉得到 `api.github.com/meta` 的入口，池子不再永久冻结。
+  `health` 与 `update-pool` 两条路径都已接入。
+- 单元测试 178 → **185**。
+
+### Investigated（按用户要求实测，结论如实记录）
+
+- **Cloudflare 1.1.1.1：当前网络全封死，不可用** —— UDP 53 超时、TCP 53 超时、
+  DoH 直连 IP 超时、`cloudflare-dns.com` 秒 RST。另勘测确认本机 System32 curl 与 Git
+  mingw64 curl 均为 Schannel 构建（与「mingw=OpenSSL」的既有假设不符，栈对比结论不受影响）；
+  系统 DNS（UDP 53 出站）全部不可用，DoH 是唯一解析通道 —— 印证了本工具「DoH 端点 IP 直连」的设计。
+
 ## [0.3.0] - 2026-10-31
 
 ### Added

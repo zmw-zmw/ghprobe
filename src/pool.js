@@ -118,13 +118,16 @@ export function fetchFirstMeta(seeds, host, pathName, timeoutMs) {
 }
 
 // 种子 IP：拉 meta 用的直连入口。优先用配置里的 seed 池，再退回 azure / fastly。
-export function seedIps(cfg) {
+// extra：调用方传入的**健康 hosts 条目**（0.4.0 自救）——它们刚通过三关 + HTTP 终审，
+// 是「当下确实能直连 GitHub」的 IP；当 seed 池被 SNI 整段封锁、静态种子全灭时，
+// 这批 IP 往往是唯一还拉得到 meta 的入口，池子不至于永久冻结。
+export function seedIps(cfg, extra = []) {
   const p = cfg.ipPools || {};
-  return [...new Set([...(p.seed || []), ...(p.azure || []), ...(p.fastly || [])])];
+  return [...new Set([...extra, ...(p.seed || []), ...(p.azure || []), ...(p.fastly || [])])];
 }
 
 // 一轮更新：拉 meta -> 展开 -> 写缓存。失败也会写 lastAttempt（冷却），避免每分钟重试撞 60 次/小时限制。
-export async function updatePool(cfg, log = () => {}) {
+export async function updatePool(cfg, log = () => {}, extraSeeds = []) {
   const u = cfg.poolUpdate || {};
   const url = new URL(u.source || "https://api.github.com/meta");
   const host = u.host || url.hostname;
@@ -133,8 +136,8 @@ export async function updatePool(cfg, log = () => {}) {
   const attemptedAt = new Date().toISOString();
   const prev = readPoolCache();
   try {
-    const seeds = seedIps(cfg);
-    if (!seeds.length) { throw new Error("配置里没有种子 IP（ipPools.seed / azure / fastly 全为空）"); }
+    const seeds = seedIps(cfg, extraSeeds);
+    if (!seeds.length) { throw new Error("配置里没有种子 IP（ipPools.seed / azure / fastly 全为空，也没有健康 hosts 条目）"); }
     // 并行试所有种子，第一个成功的立刻返回（实测 8.2s -> 亚秒级；串行时是 2m13s）。
     const { json, via } = await fetchFirstMeta(seeds, host, pathName, timeoutMs);
 

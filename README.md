@@ -457,7 +457,7 @@ networkCheck:
   probe: { host: 223.5.5.5, port: 443, timeoutMs: 2000 }
 
 fallbacks:
-  raw.githubusercontent.com: [cdn.jsdelivr.net]
+  raw.githubusercontent.com: [fastly.jsdelivr.net]
 
 timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
 probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10, schannelRetry: true, stableSamples: 2 }
@@ -485,7 +485,7 @@ ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自�
 
 ---
 
-## 6. 兜底链：为什么 hosts 里会出现 cdn.jsdelivr.net
+## 6. 兜底链：为什么 hosts 里会出现 *.jsdelivr.net
 
 除了 `github.com` 这类主域名，ghprobe 还会给**被主机名封锁**的域名配一条**兜底链**：
 主候选全灭时改探测替身域名，并把**当下能通的那个**写进 hosts。
@@ -496,18 +496,21 @@ ClientHello 的形态（实测数据见 §3「边界」）。这种时候换任�
 
 ```text
 raw.githubusercontent.com/<user>/<repo>/<ref>/<path>   ← 原始入口（常被拦）
-cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         ← jsDelivr 公共 CDN，同一份内容
+<mirror>.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>    ← jsDelivr 官方多 CDN，同一份内容
 ```
 
-**为什么只默认一个**：替身域名自己也会被封（实测同一时刻 `cdn.jsdelivr.net` 的 TCP 连得上、
-但 TLS 被掐），所以兜底链**支持多候选**；但默认只留 `cdn.jsdelivr.net` 这一条公共 CDN ——
-**ghprobe 不预置任何第三方代理 / 镜像域名**（如 `ghproxy.net` / `gh-proxy.com`）：
-这类服务「请求会经过它们的服务器」，既违背本工具「无代理」的定位，也有法律风险。
-需要更多兜底，自己加（写法见下文）：
+**0.4.0 默认链（2026-10-31 实测数据驱动）**：
 
-| 替身 | 类型 | 说明 |
-| --- | --- | --- |
-| `cdn.jsdelivr.net` | jsDelivr 公共 CDN（Cloudflare） | 路径映射 `/gh/<user>/<repo>@<ref>/<path>` |
+| 替身 | 类型 | 实测 | 说明 |
+| --- | --- | --- | --- |
+| `fastly.jsdelivr.net` | jsDelivr 官方 Fastly 段 | 全栈全 IP **100%**，TTFB ~125ms | 首选；解析稳定（151.101.x.229） |
+| `testingcf.jsdelivr.net` | jsDelivr 官方 Cloudflare 段 | 100% | 与 Fastly 真正异构，第二通道 |
+| `gcore.jsdelivr.net` | jsDelivr 官方（名义 GCore） | 100% | 当前与 testingcf 同解析到 CF，纯语义冗余 |
+| ~~`cdn.jsdelivr.net`~~ | jsDelivr 官方多 CDN 调度 | **0/45，SNI 硬封** | 0.4.0 移除：换 IP/换 TLS 栈均无效，留着白耗超时 |
+
+jsDelivr 官方子域与第三方代理不同：同一份内容、官方运营、无中间人；第三方代理
+（`ghproxy.net` / `gh-proxy.com` 一类）「请求会经过它们的服务器」，**ghprobe 不预置**，
+需要更多兜底自己加（写法见下文）：
 
 > 🔴 自己添加的第三方替身域名，其可见性 / 合规性 / 法律风险由添加者自行判断和承担。
 
@@ -522,7 +525,7 @@ cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         ← jsDelivr 公共 CDN�
 ```yaml
 fallbacks:
   raw.githubusercontent.com:
-    - cdn.jsdelivr.net
+    - fastly.jsdelivr.net        # 完整写法见 config.default.yaml：替身自带 path + mustContain 判据
     # 自己加一个：第三关用 path + mustContain 验证「这个 IP 真的在提供这份内容」
     - { domain: my.mirror.example, path: "/gh/torvalds/linux@master/README", mustContain: ["Linux kernel"] }
 ```
@@ -586,7 +589,7 @@ npm install -g ghprobe@latest
 
 ### 免责声明
 
-本工具仅做 DNS 优选与连通性探测：自身不实现、不运行任何代理、隧道或流量转发，默认配置也不预置任何第三方代理 / 镜像域名（兜底链默认仅含公共 CDN `cdn.jsdelivr.net`，其余替身需用户自行添加并自担风险）。使用本工具产生的一切后果由使用者自行承担。请遵守你所在地区的法律法规。
+本工具仅做 DNS 优选与连通性探测：自身不实现、不运行任何代理、隧道或流量转发，默认配置也不预置任何第三方代理域名（兜底链默认只含 jsDelivr 官方子域 `fastly` / `testingcf` / `gcore.jsdelivr.net`——同一份内容的官方多 CDN 入口，其余替身需用户自行添加并自担风险）。使用本工具产生的一切后果由使用者自行承担。请遵守你所在地区的法律法规。
 
 ---
 

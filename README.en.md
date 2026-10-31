@@ -461,7 +461,7 @@ networkCheck:
   probe: { host: 223.5.5.5, port: 443, timeoutMs: 2000 }
 
 fallbacks:
-  raw.githubusercontent.com: [cdn.jsdelivr.net]
+  raw.githubusercontent.com: [fastly.jsdelivr.net]
 
 timeouts: { dohMs: 5000, tcpMs: 2500, tlsMs: 6000, httpMs: 6000 }
 probe: { maxCandidates: 8, maxPoolIps: 32, maxPerDomain: 4, concurrency: 10, schannelRetry: true, stableSamples: 2 }
@@ -488,7 +488,7 @@ If you deployed via `install.ps1`, you can also use `.\install.ps1 -Uninstall`.
 
 ---
 
-## 6. The fallback chain: why cdn.jsdelivr.net shows up in hosts
+## 6. The fallback chain: why *.jsdelivr.net shows up in hosts
 
 Besides the primary domains like `github.com`, ghprobe maintains a **fallback chain** for
 hostname-blocked domains: when every primary candidate is dead, it probes alternative entry
@@ -501,20 +501,22 @@ entry domain** will. GitHub file content has several equivalent entry points:
 
 ```text
 raw.githubusercontent.com/<user>/<repo>/<ref>/<path>   <- the original (often blocked)
-cdn.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>         <- jsDelivr public CDN, same content
+<mirror>.jsdelivr.net/gh/<user>/<repo>@<ref>/<path>    <- jsDelivr's official multi-CDN, same content
 ```
 
-**Why only one by default**: fallback domains get blocked too (measured at the same moment:
-`cdn.jsdelivr.net` accepted TCP but had its TLS handshake cut), so the chain **supports
-multiple candidates**; but the default ships only the public CDN `cdn.jsdelivr.net` —
-**ghprobe presets no third-party proxy or mirror domains** (e.g. `ghproxy.net` /
-`gh-proxy.com`): with those, "your requests go through their server", which contradicts
-this tool's "no proxy" positioning and carries legal risk. Add your own if you need more
-(how-to below):
+**The default chain since 0.4.0 (driven by 2026-10-31 measurements)**:
 
-| Fallback | Type | Note |
-| --- | --- | --- |
-| `cdn.jsdelivr.net` | jsDelivr public CDN (Cloudflare) | path mapping `/gh/<user>/<repo>@<ref>/<path>` |
+| Fallback | Type | Measured | Note |
+| --- | --- | --- | --- |
+| `fastly.jsdelivr.net` | jsDelivr's official Fastly segment | **100%** across all stacks/IPs, TTFB ~125ms | first choice; stable resolution (151.101.x.229) |
+| `testingcf.jsdelivr.net` | jsDelivr's official Cloudflare segment | 100% | genuinely heterogeneous from Fastly; second channel |
+| `gcore.jsdelivr.net` | jsDelivr official (nominally GCore) | 100% | currently resolves to the same CF IPs as testingcf; semantic redundancy only |
+| ~~`cdn.jsdelivr.net`~~ | jsDelivr official multi-CDN scheduler | **0/45, hard SNI-blocked** | removed in 0.4.0: no IP or TLS stack helps, it only burns probe timeouts |
+
+The official jsDelivr subdomains are not third-party proxies: same content, officially
+operated, no man-in-the-middle. Third-party proxies (`ghproxy.net` / `gh-proxy.com` and
+alike) mean "your requests go through their server" — **ghprobe presets none**; add your
+own if you need more (how-to below):
 
 > Any third-party fallback domain you add yourself is your own judgement and risk.
 
@@ -530,7 +532,7 @@ Behaviour and prerequisites:
 ```yaml
 fallbacks:
   raw.githubusercontent.com:
-    - cdn.jsdelivr.net
+    - fastly.jsdelivr.net        # full form (with path + mustContain) shown in config.default.yaml
     # Add your own: gate 3 uses path + mustContain to verify this IP really serves this content
     - { domain: my.mirror.example, path: "/gh/torvalds/linux@master/README", mustContain: ["Linux kernel"] }
 ```
@@ -594,7 +596,7 @@ The task registered by `install` uses `LogonType = Interactive`, so it won't fir
 
 ### Disclaimer
 
-This tool performs DNS preference selection and connectivity probing only. It implements and runs no proxy, tunnel, or traffic forwarding itself, and presets no third-party proxy or mirror domains in its default config (the fallback chain defaults to the public CDN `cdn.jsdelivr.net`; any other fallback must be added by the user, at their own risk). You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
+This tool performs DNS preference selection and connectivity probing only. It implements and runs no proxy, tunnel, or traffic forwarding itself, and presets no third-party proxy domains in its default config (the fallback chain defaults to jsDelivr's official subdomains `fastly` / `testingcf` / `gcore.jsdelivr.net` — official multi-CDN entries for the same content; any other fallback must be added by the user, at their own risk). You are solely responsible for any consequences of using this tool. Please comply with the laws and regulations of your jurisdiction.
 
 ---
 
