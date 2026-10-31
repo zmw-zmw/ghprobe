@@ -5,6 +5,25 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-10-31
+
+### Added
+
+- **用户行为感知的切换时机算法（`src/algorithm.js`）**：换 IP 不是零成本 —— flushdns +
+  连接池重建，正在浏览的页面会卡一下。daemon 现在按「打扰成本 vs 紧急度」决定何时落盘：
+  - **成本权重**（可配 `algorithm.weights`）：前台是浏览器 100 > 浏览器在后台跑 30 >
+    前台是其他软件 10 > 空闲 0；
+  - **P0 不吃权重**：当前主备全死、用户此刻真的断着的域名 → **立即切**。「正在用」
+    和「不能用」二选一，当然选别断网；首次写入（无从打扰）同此；
+  - **非紧急优化类**（提上备选 / 重排优化 / 补缺失 / 兜底写入）在前台是浏览器时**推迟**，
+    攒成待写块由 daemon 每轮检查，用户空闲后落地；推迟上限 `deferMaxMs`（默认 10 分钟）防饿死。
+  - 检测免管理员：`tasklist` 扫浏览器进程（名单可配）+ PowerShell `GetForegroundWindow`
+    查前台窗口；结果短缓存（beforeApply 同轮复用，空闲落地走新鲜检测）。
+  - 只作用于 daemon 自动写入；手动 `health --apply` / `probe --apply` 是显式意图，不设门。
+- 顺带修正：`fullUpdate` 写入时把 `hostsPath` 传给 `applyHosts`（此前健康检查的写路径
+  测试注入会被忽略，默认恰好等于真实 hosts 才未暴露）。
+- 单元测试 192 → **201**（tasklist 解析 / 成本权重 / 决策矩阵 / 门控与空闲落地，全注入）。
+
 ## [0.5.0] - 2026-10-31
 
 ### Added

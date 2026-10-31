@@ -265,15 +265,17 @@ function sameExtras(a, b) {
 }
 
 // 完整一轮健康检查：读 -> 测已写入 -> 决策 -> （异常时）全量探测 + 部分更新
-// write=true 时才真正 applyHosts（会弹 UAC），否则仅预览
-export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS) {
+// write=true 时才真正 applyHosts（会弹 UAC），否则仅预览。
+// hooks.beforeApply（0.6.0，daemon 传）：写前门控 —— meta = { deadDomains, initial, changed,
+// reason, block, cfg }，返回 false 表示「按用户行为算法推迟」，本轮不落盘、块由门控方保存。
+export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, promote = new Map(), hooks = {}) {
   const say = log || (() => {});
   const content = fs.readFileSync(hostsPath, "utf8");
   const current = parseBlock(content);
 
   if (current.entries.size === 0) {
     say("hosts 无 ghprobe 记录，触发首次全量");
-    return fullUpdate(cfg, log, content, current, targetDomains(cfg), write, hostsPath);
+    return fullUpdate(cfg, log, content, current, targetDomains(cfg), write, hostsPath, promote, hooks);
   }
 
   // 🔴 主条目 + 备选条目一起探活。旧版只探主条目 —— 于是「主 IP 挂了、备选还是好的」
@@ -296,14 +298,22 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS) 
     return { action: "none", reason: decision.reason, block: null, stuck: [] };
   }
 
+  // 主备全死的域名数（0.6.0）：algorithm 门控的 P0 紧急度 —— 用户此刻真的断着
+  const byDomain = new Map();
+  for (const r of probeResults) {
+    if (!byDomain.has(r.domain)) { byDomain.set(r.domain, []); }
+    byDomain.get(r.domain).push(r);
+  }
+  const deadAll = [...byDomain.entries()].filter(([, rs]) => rs.every((r) => !r.ok)).map(([d]) => d);
+
   say(`异常：${decision.reason}`);
-  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath, decision.promote);
+  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath, decision.promote, hooks, deadAll);
 }
 
 // 全量探测 + 部分更新 + 写回；护栏与粘性都在 applyDelta 里体现。
 // 只探 diagnose 里的域名：典型场景是「github.com 的 IP 死了，codeload / jsdelivr 还活着」，
 // 此时探 1 个域名（~8 个候选）而不是 6 个（~48 个），失败发现到修好的时间从 ~90s 压到 ~20s。
-async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map()) {
+async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map(), hooks = {}, deadAll = []) {
   const say = log || (() => {});
   // diagnose 为空 = 只有「提上备选」要做，没有需要重排的域名 -> 跳过探测，直接写提升结果
   const r = diagnose.length ? await runProbe(cfg, log, diagnose) : { ranked: new Map(), extra: new Map(), raw: [] };
@@ -332,6 +342,18 @@ async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath
   if (d.sniBlocked.length) { parts.push(`指纹阻断: ${d.sniBlocked.join(", ")}`); }
   const msg = parts.length ? parts.join("；") : "更新缺失域名冷却记录";
   if (write) {
+    // 0.6.0 用户行为门控：P0（有主备全死的域名）/ 首次写入 直接过；
+    // 非紧急优化类在「用户正用浏览器」时被拒 —— 块由门控方保存，空闲后落地。
+    if (hooks.beforeApply) {
+      const ok = await hooks.beforeApply({
+        deadDomains: deadAll, initial: current.entries.size === 0,
+        changed: d.changed, reason: msg, block, cfg,
+      });
+      if (!ok) {
+        say(`按用户行为算法推迟写入（用户正在用浏览器；修复类不受限，上限 10 分钟）`);
+        return { action: "deferred", reason: "按 algorithm 推迟写入（浏览器使用中）", block, stuck: d.stuck };
+      }
+    }
     const lock = acquireHostsLock();
     if (!lock) {
       say("另一进程正在写 hosts，本轮跳过（下轮健康检查会自动补写）");
@@ -340,7 +362,7 @@ async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath
     try {
       // 锁内重读最新 hosts：探测耗时期间他人可能已改过，避免覆盖别人刚写的新值
       const latest = fs.readFileSync(hostsPath, "utf8");
-      await applyHosts(mergeHosts(latest, block));
+      await applyHosts(mergeHosts(latest, block), hostsPath);
       say(`已写入 hosts：${msg}${stuckNote}`);
     } finally { releaseHostsLock(lock); }
   } else {

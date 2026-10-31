@@ -183,6 +183,28 @@ probe:
 hosts:
   maxEntriesPerDomain: 2
 serve: { host: 127.0.0.1, port: 8930 }
+# 用户行为感知的「切换时机」算法（0.6.0，daemon 专用）：
+# 换 IP 有打扰成本（flushdns + 连接池重建，正在看的页面会卡一下）。成本按权重打分：
+#   前台是浏览器 100 > 浏览器在后台跑 30 > 前台是其他软件 10 > 空闲 0
+# 非紧急优化类写入（提上备选/重排优化/补缺失/兜底）在「前台是浏览器」时**推迟**，攒到空闲落地，
+# 上限 deferMaxMs 防饿死；**当前已断的域名（主备全死）不吃权重，立即切** —— 正在用 ≠ 该断网。
+# 检测免管理员：tasklist 扫浏览器进程 + PowerShell GetForegroundWindow 查前台。
+algorithm:
+  enabled: true
+  deferMaxMs: 600000        # 推迟上限（毫秒）：到点强制切，宁可打扰也不能饿死修复
+  deferThreshold: 100       # 成本 >= 此值才推迟（默认只有「前台是浏览器」会到 100）
+  detectCacheMs: 20000      # 活动检测结果缓存（daemon 一轮内不重复打系统）
+  browsers:                 # 视作「浏览器」的进程名（小写，不带 .exe）
+    - chrome
+    - msedge
+    - firefox
+    - brave
+    - opera
+    - vivaldi
+    - 360se
+    - 360chrome
+    - qqbrowser
+    - sogouexplorer
 # 调度：固定频率健康检查，不做指数退避（哨兵一轮 <2s，退避省不下开销反而拉长最坏发现延迟）
 schedule:
   # 哨兵间隔（分钟）：只测已写入 IP（3 条并发，健康时 ~1s），异常才触发全量重排。

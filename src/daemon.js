@@ -12,13 +12,12 @@
 //   · daemon 崩溃 -> 下一分钟监督者自动复活它；旧版本 npm 用户没有心跳文件，行为完全不变
 import fs from "node:fs";
 import path from "node:path";
-import { userDataDir } from "./hosts.js";
+import { userDataDir, applyHosts, mergeHosts, WIN_HOSTS } from "./hosts.js";
 import { hasLocalNetwork } from "./net.js";
 import { loadConfig } from "./config.js";
-import { parseBlock } from "./health.js";
-import { runHealth } from "./health.js";
+import { parseBlock, runHealth, shouldKeepOldBlock } from "./health.js";
 import { poolNeedsUpdate, updatePool } from "./pool.js";
-import { WIN_HOSTS } from "./hosts.js";
+import { createSwitchGate } from "./algorithm.js";
 
 const HEARTBEAT_MAX_AGE_MS = 150_000;   // 心跳超过这个年龄视为陈旧（单轮最坏 ~90s，留余量）
 
@@ -69,7 +68,9 @@ export function nextIntervalMs(result, intervals = {}) {
   return troubled ? fast : healthy;
 }
 
-// 单轮自愈：断网跳过 -> 到点刷池（带 hosts 健康条目当种子）-> runHealth(写 hosts)
+// 单轮自愈：断网跳过 -> 到点刷池（带 hosts 健康条目当种子）-> runHealth(写 hosts)。
+// deps.gate（0.6.0）：用户行为门控 —— 非紧急写入在「用户正用浏览器」时被推迟，
+// 攒进门控的 pendingBlock；健康轮结束后由 flushPending 空闲落地。
 export async function daemonCycle(cfg, log, deps = {}) {
   if (!(await (deps.hasNetwork || hasLocalNetwork)(cfg))) {
     return { action: "skip", reason: "本地无网络连接", offline: true, block: null, stuck: [] };
@@ -82,12 +83,39 @@ export async function daemonCycle(cfg, log, deps = {}) {
       log(`候选池更新失败（忽略，用现有池继续）: ${e.message}`);
     }
   }
-  return runHealth(cfg, log, true);
+  const hooks = deps.gate ? { beforeApply: deps.gate.beforeApply } : {};
+  const result = await runHealth(cfg, log, true, WIN_HOSTS, undefined, hooks);
+  // 空闲落地：上轮被推迟的块，此刻成本低就写掉（含全灭护栏）
+  if (deps.gate && deps.gate.pending && (!result || result.action === "none" || result.action === "deferred")) {
+    try {
+      await flushPending(cfg, log, deps.gate, deps.hostsPath || WIN_HOSTS, deps.applyHosts);
+    } catch (e) {
+      log(`推迟块落地失败（下轮重试）: ${e.message}`);
+    }
+  }
+  return result;
+}
+
+// 把门控攒下的块落地：重读最新 hosts + 全灭护栏 + 合并写入。
+// deps.applyHosts 可注入（单测不写真 hosts）。
+export async function flushPending(cfg, log, gate, hostsPath = WIN_HOSTS, applyHostsImpl = applyHosts) {
+  return gate.maybeFlush(cfg, log, {
+    hostsPath,
+    applyHosts: (merged, p) => applyHostsImpl(merged, p),
+    mergeLatest: (block) => {
+      const latest = fs.readFileSync(hostsPath, "utf8");
+      if (shouldKeepOldBlock(latest, block)) {
+        throw new Error("全灭护栏：推迟块无有效 IP 而现有条目可用，放弃落地");
+      }
+      return mergeHosts(latest, block);
+    },
+  });
 }
 
 // 常驻主循环。返回条件：单实例让位（更年轻的 daemon 在跑）或 deps.maxCycles 用完（测试）。
 export async function runDaemon(cfg, log = () => {}, deps = {}) {
-  const cycle = deps.cycle || daemonCycle;
+  const gate = deps.gate !== undefined ? deps.gate : createSwitchGate();
+  const cycle = deps.cycle || ((c, l) => daemonCycle(c, l, { gate, applyHosts: deps.applyHosts, hostsPath: deps.hostsPath }));
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const intervals = deps.intervals || {};
   const maxCycles = deps.maxCycles ?? Infinity;
