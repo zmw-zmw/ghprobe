@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseBlock, targetDomains } from "./health.js";
 import { userDataDir, WIN_HOSTS } from "./hosts.js";
+import { readHeartbeat, heartbeatFresh, processAlive } from "./daemon.js";
 
 export function healthLogPath() {
   return path.join(userDataDir(), "ghprobe.log");
@@ -27,7 +28,7 @@ function generatedAt(content) {
 }
 
 // 纯函数：由既有状态组装速查报告。全离线 —— 不探测、不解析、不查任务网络。
-export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null }) {
+export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null, daemon = undefined }) {
   const current = parseBlock(hostsContent);
   const targets = targetDomains(cfg);
   const lines = [];
@@ -49,7 +50,16 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
   for (const [d, ts] of (current.blocked || new Map())) { lines.push(`  [阻断] ${d}（${ts} 起冷却；浏览器栈也验证过被拦，详见 README §3）`); }
   if (missing.length) { lines.push(`  [未写入] ${missing.join(", ")}（下轮健康检查自动补）`); }
 
-  // ② 计划任务
+  // ② 常驻守护 + 计划任务
+  if (daemon === undefined) { daemon = readHeartbeat(); }
+  if (daemon && heartbeatFresh(daemon) && processAlive(daemon.pid)) {
+    const age = Math.round((Date.now() - new Date(daemon.at).getTime()) / 1000);
+    lines.push(`常驻守护：运行中（pid ${daemon.pid}，心跳 ${age}s 前，15~45s 自适应自愈）`);
+  } else if (daemon) {
+    lines.push("常驻守护：未运行（心跳陈旧）—— 监督者会在下一分钟自动拉起");
+  } else {
+    lines.push("常驻守护：未启动过 —— 下一轮 health（≤1 分钟）自动拉起");
+  }
   if (task === null || task === undefined) {
     lines.push("计划任务：查询跳过（仅 Windows）");
   } else if (task.output && /ghprobe/i.test(task.output)) {

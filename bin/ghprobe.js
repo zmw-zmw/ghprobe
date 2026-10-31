@@ -14,8 +14,10 @@ import { probeNow, startServer } from "../src/server.js";
 import { runHealth, blockFromProbeResult, shouldKeepOldBlock, parseBlock } from "../src/health.js";
 import { runDoctor, formatReport, queryTask } from "../src/doctor.js";
 import { runStatus } from "../src/status.js";
+import { runDaemon, readHeartbeat, heartbeatFresh, daemonRunning } from "../src/daemon.js";
 import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
 import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -37,14 +39,29 @@ function writeHealthLog(action, reason, extra = {}) {
   const entry = `${new Date().toISOString()} health action=${action} reason=${reason}`
     + `${extra.changed && extra.changed.length ? ` changed=${extra.changed.join(",")}` : ""}`
     + `${extra.stuck && extra.stuck.length ? ` stuck=${extra.stuck.join(",")}` : ""}\n`;
+  appendRawLog(entry);
+}
+
+// 通用日志追加（daemon / 监督者用普通行，health 用上面的带格式行）
+function appendRawLog(line) {
   try {
     const f = healthLogPath();
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    // 新文件写 UTF-8 BOM：否则 PowerShell 5.1 的 Get-Content 会按系统 ANSI 解码，
-    // 中文日志在用户查看时变乱码（文件本身没错，是读取端猜错编码）。
     const prefix = fs.existsSync(f) ? "" : "\ufeff";
-    fs.appendFileSync(f, prefix + entry);
+    fs.appendFileSync(f, prefix + line);
   } catch { /* 日志写失败不影响主流程 */ }
+}
+
+// 监督者：daemon 心跳陈旧时拉起新实例（分离进程，继承当前权限，随调用方退出继续存活）。
+// 成功与否都不阻断本轮 —— 本轮 health 照常执行，作为 daemon 就位前的兜底。
+function spawnDaemonDetached() {
+  try {
+    const child = spawn(process.execPath, [path.join(ROOT, "bin", "ghprobe.js"), "daemon"], {
+      detached: true, stdio: "ignore", windowsHide: true,
+    });
+    child.unref();
+    return true;
+  } catch { return false; }
 }
 
 // 打印 hosts 块里的 IP 条目（install 完成后回显写入结果）
@@ -87,6 +104,15 @@ program.command("doctor")
     const r = await runDoctor(cfg, (m) => console.error(m));
     console.log(formatReport(r.checks));
     if (!r.ok) { process.exitCode = 1; }
+  });
+
+program.command("daemon")
+  .description("常驻自愈循环（由监督者自动拉起，一般不需要手动跑）：15~45s 自适应健康检查")
+  .option("-c, --config <path>", "用户配置覆盖")
+  .action(async (opts) => {
+    const cfg = loadConfig(opts.config);
+    await runDaemon(cfg, (m) => appendRawLog(`${new Date().toISOString()} ${m}\n`));
+    // 正常不返回；返回即让位/已有实例，静默退出
   });
 
 program.command("status")
@@ -160,8 +186,22 @@ program.command("health")
   .description("健康检查：只测已写入 IP，异常才全量重排换 IP（加 --apply 才写 hosts）")
   .option("-c, --config <path>", "用户配置覆盖")
   .option("-a, --apply", "检测到异常时写入系统 hosts（会弹 UAC）")
+  .option("-f, --force", "跳过 daemon 监督逻辑，本轮亲自跑（诊断用）")
   .action(async (opts) => {
     let cfg = loadConfig(opts.config);
+    // 0.5.0 监督者逻辑：daemon 心跳新鲜 -> 秒退（它在干活，重复探测纯属浪费）；
+    // 心跳陈旧/没有 -> 拉起新 daemon（分离进程），本轮仍照常执行，作为 daemon 就位前的兜底。
+    // daemon 崩溃 -> 下一分钟这里自动复活它。手动诊断加 --force 绕过。
+    if (!opts.force) {
+      const hb = readHeartbeat();
+      if (daemonRunning(hb)) {
+        writeHealthLog("skip", "daemon 心跳新鲜，本轮交给 daemon");
+        return;
+      }
+      if (spawnDaemonDetached()) {
+        appendRawLog(`${new Date().toISOString()} supervisor action=spawn-daemon reason=${hb ? "心跳陈旧" : "无心跳"}\n`);
+      }
+    }
     // 本地断网 -> 直接跳过：所有候选必然全灭，跑一轮只会刷屏并把真故障淹掉。
     if (!(await hasLocalNetwork(cfg))) {
       console.error("本地无网络连接，跳过本轮（不探测、不更新池、不写 hosts）");
