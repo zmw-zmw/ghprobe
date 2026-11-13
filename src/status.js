@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseBlock, targetDomains } from "./health.js";
 import { userDataDir, WIN_HOSTS, isPaused } from "./hosts.js";
+import { detectProxyEndpoint } from "./proxy.js";
 import { readHeartbeat, heartbeatFresh, processAlive } from "./daemon.js";
 
 export function healthLogPath() {
@@ -28,7 +29,8 @@ function generatedAt(content) {
 }
 
 // 纯函数：由既有状态组装速查报告。全离线 —— 不探测、不解析、不查任务网络。
-export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null, daemon = undefined, paused = false }) {
+// proxy（0.1.7）：detectProxyEndpoint 的结果（本地检测不碰网络）或 null。
+export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null, daemon = undefined, paused = false, proxy = null }) {
   const current = parseBlock(hostsContent);
   const targets = targetDomains(cfg);
   const lines = [];
@@ -37,6 +39,9 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
   // 的文案会误导用户以为没装好
   if (paused) {
     lines.push("状态：已暂停（ghprobe off）—— hosts 块已剥离，自愈停止写入；跑 ghprobe on 恢复");
+  }
+  if (proxy) {
+    lines.push(`本地代理：检测到 ${proxy.host}:${proxy.port}（${proxy.kind}；存活与否由 daemon/doctor 实测）—— 直连探活失败时会借它判「IP 真死还是本机抖动」`);
   }
 
   // ① hosts 块现状
@@ -88,11 +93,19 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
 }
 
 // 一轮速查。deps 全可注入（单测不打文件系统/任务）。
+// proxyEndpoint：本地代理端点（0.1.7）。缺省做一次**纯本地**检测（env/注册表/端口扫描，
+// 不碰外网 —— status 的「不打网络请求」承诺不破）。
 export async function runStatus(cfg, deps = {}) {
   const hostsContent = deps.hostsContent ?? (() => { try { return fs.readFileSync(WIN_HOSTS, "utf8"); } catch { return ""; } })();
   const logTail = deps.logTail ?? readLogTail();
   const task = deps.taskQuery ? await deps.taskQuery() : null;
   const paused = deps.paused ?? isPaused();
-  const lines = buildStatusReport({ hostsContent, cfg, logTail, task, paused });
+  let proxy = null;
+  if (deps.proxyEndpoint !== undefined) {
+    proxy = deps.proxyEndpoint;
+  } else {
+    try { proxy = await detectProxyEndpoint(cfg); } catch { proxy = null; }
+  }
+  const lines = buildStatusReport({ hostsContent, cfg, logTail, task, paused, proxy });
   return { lines, entries: parseBlock(hostsContent).entries.size };
 }

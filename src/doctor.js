@@ -11,6 +11,7 @@ import { runProbe } from "./probe.js";
 import { hasLocalNetwork } from "./net.js";
 import { parseBlock, targetDomains, blockedDomainsFromRaw } from "./health.js";
 import { WIN_HOSTS } from "./hosts.js";
+import { detectProxy } from "./proxy.js";
 
 // 单条结论：status = ok（正常）/ warn（能用但要注意）/ fail（有问题）/ info（仅供参考）
 // hint 只在非 ok 时给「下一步做什么」，正常项不啰嗦
@@ -99,6 +100,24 @@ export function evaluateDoh(sources, ips) {
     "内置池会过期；检查防火墙是否拦了 443 出站，或在配置里更换 doh 端点");
 }
 
+// 本地代理共存（0.1.7）：检测到且可用 -> 说明它会参与判活；检测到但不可用 -> 要提醒；
+// 没检测到 -> 正常直连模式，不是问题。pi = detectProxy 结果或 null（跳过/非 Windows 环境）。
+export function evaluateProxy(pi) {
+  if (pi === null || pi === undefined) {
+    return check("proxy", "本地代理共存", "info", "跳过（未检测或平台不支持）");
+  }
+  if (!pi.found) {
+    return check("proxy", "本地代理共存", "info", "未检测到本地代理（直连模式）");
+  }
+  if (pi.alive) {
+    return check("proxy", "本地代理共存", "ok",
+      `检测到 ${pi.host}:${pi.port}（${pi.kind}），经它可达 GitHub（rtt ${pi.rttMs}ms）—— 直连探活失败时会借它判「IP 真死还是本机抖动」，代理停止时自动全量重测`);
+  }
+  return check("proxy", "本地代理共存", "warn",
+    `检测到 ${pi.host}:${pi.port}（${pi.kind}）但经它连不上 GitHub —— 不参与判活`,
+    "代理开着但到不了 GitHub：检查代理软件是否在线、分流规则是否放行 github.com；不用代理可忽略");
+}
+
 // 汇总：有无 fail。warn 不算不健康 —— blocked 域名（浏览器可能仍可用）不该让 doctor 退出码非零。
 export function overall(checks) {
   const failed = checks.filter((c) => c.status === "fail");
@@ -141,6 +160,7 @@ export async function runDoctor(cfg, log = () => {}, deps = {}) {
     readHosts: deps.readHosts || (() => { try { return readFileSync(WIN_HOSTS, "utf8"); } catch { return ""; } }),
     taskQuery: deps.taskQuery || queryTask,
     blockedFromRaw: deps.blockedFromRaw || null,
+    detectProxy: deps.detectProxy || null,
   };
   const checks = [];
 
@@ -167,7 +187,14 @@ export async function runDoctor(cfg, log = () => {}, deps = {}) {
   const hosts = evaluateHosts(d.readHosts(), cfg, Boolean(deps.probe));
   checks.push(...hosts.checks);
 
-  // ⑤ 计划任务
+  // ⑤ 本地代理共存（0.1.7）。deps.probe 被注入（测试替身）时跳过 —— 与 DoH 一样不打真网络。
+  if (!deps.probe) {
+    let pi = null;
+    try { pi = await (d.detectProxy || detectProxy)(cfg); } catch { pi = { found: false, alive: false, reason: "检测失败" }; }
+    checks.push(evaluateProxy(pi));
+  }
+
+  // ⑥ 计划任务
   checks.push(evaluateTask(await d.taskQuery()));
 
   return { ...overall(checks), checks };

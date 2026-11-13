@@ -29,6 +29,33 @@ export function neededFallbacks(ranked, cfg) {
   return [...new Set(list)];
 }
 
+// 备选差异化（0.1.7，纯函数）：从有序候选里给主 IP 挑 `count` 个备选，
+// **优先挑不同网段的** —— hosts 的备选只在「主 IP 死了」时被客户端挨个尝试，
+// 同 /24（常为同一 POP / 同一汇聚点）的备选往往和主 IP 一起死，等于没兜底。
+// 优先级：不同 /16 > 同 /16 不同 /24 > 同 /24（保底按原顺序补齐）。
+// list 元素是 { ip, ... } 或裸 IP 字符串，两者都认；返回 IP 字符串数组。
+export function pickAlts(list, primaryIp, count) {
+  const n = Math.max(0, count | 0);
+  if (!n) { return []; }
+  const net = (ip, k) => String(ip).split(".").slice(0, k).join(".");
+  const used16 = new Set([net(primaryIp, 2)]);
+  const used24 = new Set([net(primaryIp, 3)]);
+  const rest = (list || []).map((x) => (typeof x === "string" ? x : x.ip)).filter((ip) => ip && ip !== primaryIp);
+  const picked = [];
+  for (const tier of [0, 1, 2]) {
+    for (const ip of rest) {
+      if (picked.includes(ip)) { continue; }
+      const t = used16.has(net(ip, 2)) ? (used24.has(net(ip, 3)) ? 2 : 1) : 0;
+      if (t !== tier) { continue; }
+      picked.push(ip);
+      used16.add(net(ip, 2));
+      used24.add(net(ip, 3));
+      if (picked.length >= n) { return picked; }
+    }
+  }
+  return picked;
+}
+
 // 多次采样合并（纯函数）：把首轮结果与复测样本按 (domain, ip) 分组，
 //   · 有活样本 -> score = 活样本均值 + 每个失败样本罚 penaltyMs（抖动 IP 别排第一）
 //   · 全部失败 -> 保留失败结果（字段取首个，ok=false，供 blockedDomainsFromRaw 判读）

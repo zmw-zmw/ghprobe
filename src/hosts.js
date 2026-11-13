@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { pickAlts } from "./ranker.js";
 
 export const WIN_HOSTS = "C:\\Windows\\System32\\drivers\\etc\\hosts";
 const BEGIN = "# === ghprobe begin ===";
@@ -114,10 +115,14 @@ export function releaseHostsLock(fd) {
 //    dns.lookup/all 与 curl 双证），且 curl / 浏览器会**逐个尝试** —— 黑洞 IP 排在前也能
 //    fallback 到后面的活 IP（实测 http=200 / 0.22s）。旧注释「只取第一条生效」是错的。
 //    所以多写 1 条备选 = 抖动时客户端自动兜底，不必干等下一轮健康检查（最长 1 分钟）。
+// 0.1.7：备选经 pickAlts 差异化 —— 优先挑不同网段的，同段 IP 常与主 IP 一起死。
 export function buildBlock(ranked, extraDomains, maxPer = 2) {
   const lines = [BEGIN, `# generated ${new Date().toISOString()} by ghprobe`];
   const put = (domain, rs) => {
-    for (const r of (rs || []).slice(0, Math.max(1, maxPer))) { lines.push(`${r.ip} ${domain}`); }
+    const list = rs || [];
+    if (!list.length) { return; }
+    lines.push(`${list[0].ip} ${domain}`);
+    for (const ip of pickAlts(list, list[0].ip, Math.max(1, maxPer) - 1)) { lines.push(`${ip} ${domain}`); }
   };
   for (const [domain, rs] of ranked) {
     if (rs.length) { put(domain, rs); }
