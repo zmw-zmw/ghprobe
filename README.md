@@ -50,13 +50,18 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 
 ```yaml
 doh:
-  - { name: alidns1, host: 223.5.5.5, sni: dns.alidns.com, path: /dns-query }
-  - { name: alidns2, host: 223.6.6.6, sni: dns.alidns.com, path: /dns-query }
-  - { name: dnspod,  host: 1.12.12.12, sni: doh.pub,        path: /dns-query }
-  - { name: dnspod2, host: 120.53.53.53, sni: doh.pub,      path: /dns-query }
+  - { name: alidns1,  host: 223.5.5.5,      sni: dns.alidns.com, path: /dns-query }
+  - { name: alidns2,  host: 223.6.6.6,      sni: dns.alidns.com, path: /dns-query }
+  - { name: dnspod,   host: 1.12.12.12,    sni: doh.pub,        path: /dns-query }
+  - { name: dnspod2,  host: 120.53.53.53,  sni: doh.pub,        path: /dns-query }
+  - { name: dns360-1, host: 111.7.73.60,    sni: doh.360.cn,     path: /dns-query }
+  - { name: dns360-2, host: 221.181.72.233, sni: doh.360.cn,     path: /dns-query }
+  - { name: dns360-3, host: 39.156.84.71,   sni: doh.360.cn,     path: /dns-query }
 ```
 
-多个端点并发查询，成功者取并集去重，再用内置 IP 池补一批候选。
+默认端点 = 阿里 ×2 + DNSPod ×2 + 360 ×3（0.1.9 起实测连续 45/45 次成功）。为什么不能随便堆：候选端点必须 ① 裸 IP 可用 ② 国内直连可达 ③ 自身不被污染 —— 实测 Cloudflare / Google / Quad9 / AdGuard 的 TCP 443 全部被墙，能用的国内公共 DoH 就这几家。
+
+多个端点并发查询，成功者取并集去重，再用内置 IP 池补一批候选。多源不只是冗余：不同厂商的 anycast 返回的 GitHub IP 不同段（实测 360 与阿里/DNSPod 的答案互不重叠），并查能让候选池更宽 —— 直连探测那关再把不可用的淘汰。
 
 **② 三关探测：只有三关全过才算「活」**
 

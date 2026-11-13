@@ -23,6 +23,19 @@ test("loadConfig: 无用户配置时返回默认配置", () => {
   assert.ok(cfg.timeouts.httpMs > 0);
 });
 
+test("loadConfig: 默认 DoH 7 条(阿里×2+DNSPod×2+360×3),全部 IP 直连带 SNI", () => {
+  const cfg = loadConfig();
+  assert.equal(cfg.doh.length, 7);
+  const byName = new Map(cfg.doh.map((e) => [e.name, e]));
+  for (const n of ["alidns1", "alidns2", "dnspod", "dnspod2", "dns360-1", "dns360-2", "dns360-3"]) {
+    assert.ok(byName.has(n), `缺少端点 ${n}`);
+    assert.ok(/^\d+\.\d+\.\d+\.\d+$/.test(byName.get(n).host), `${n} 必须裸 IP 直连`);
+    assert.ok(byName.get(n).sni, `${n} 必须带 SNI(RFC 6066 不允许 IP 当 SNI)`);
+    assert.equal(byName.get(n).path, "/dns-query");
+  }
+  assert.equal(new Set(cfg.doh.map((e) => e.host)).size, 7, "端点 IP 不得重复");
+});
+
 test("loadConfig: 用户只覆盖 timeouts.tlsMs 不会清空 dohMs/httpMs", () => {
   const cfg = withUserYaml("timeouts:\n  tlsMs: 3000\n", (p) => loadConfig(p));
   assert.equal(cfg.timeouts.tlsMs, 3000);
