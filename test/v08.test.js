@@ -388,16 +388,30 @@ test("daemonCycle: 代理持续死亡（上轮已 false）不重复触发重测"
   assert.equal(probes, 0, "没有跃迁就不该全量重测");
 });
 
-test("daemonCycle: 代理恢复（false->true）只记账不动手", async () => {
-  const cfg = { domains: [], fallbacks: {}, proxy: { enabled: true }, schedule: {}, poolUpdate: { enabled: false } };
+test("daemonCycle: 代理恢复（false->true）进入保活模式（0.1.8 语义）", async () => {
+  const dir = tmpDir();
+  const hostsPath = path.join(dir, "hosts");
+  fs.writeFileSync(hostsPath, buildHealthBlock(new Map([["github.com", "9.9.9.9"]]), new Map(), new Map()), "utf8");
+  const cfg = { domains: [], fallbacks: {}, proxy: { enabled: true, idleProbeMin: 5 }, schedule: {}, poolUpdate: { enabled: false } };
   const ps = { wasAlive: false };
-  await daemonCycle(cfg, () => {}, {
+  const applied = [];
+  let probes = 0;
+  const r = await daemonCycle(cfg, () => {}, {
     proxyState: ps,
     detectProxy: async () => ({ found: true, alive: true, host: "127.0.0.1", port: 1, kind: "test" }),
+    runProbe: async () => { probes += 1; return { ranked: new Map([["github.com", [{ domain: "github.com", ip: "8.8.8.8", ok: true, score: 10 }]]]), extra: new Map(), raw: [] }; },
+    readHosts: () => fs.readFileSync(hostsPath, "utf8"),
+    applyHosts: async (merged) => { applied.push(merged); fs.writeFileSync(hostsPath, merged, "utf8"); return { ok: true }; },
+    hostsPath,
     hasNetwork: async () => false,
   });
   assert.equal(ps.wasAlive, true, "状态要更新");
   assert.equal(ps.endpoint, "127.0.0.1:1");
+  assert.equal(probes, 1, "进入保活要立即建 standby");
+  assert.match(applied[applied.length - 1], /# idle 8\.8\.8\.8 github\.com/, "standby 以注释形式写入");
+  assert.doesNotMatch(applied[applied.length - 1], /^9\.9\.9\.9 /m, "原条目已被注释");
+  assert.match(applied[applied.length - 1], /# proxy-idle /, "要有保活模式标记");
+  assert.ok(r.proxied, "结果要标 proxied");
 });
 
 // ---------- doctor / status 展示 ----------

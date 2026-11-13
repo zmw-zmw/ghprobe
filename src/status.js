@@ -44,13 +44,22 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
     lines.push(`本地代理：检测到 ${proxy.host}:${proxy.port}（${proxy.kind}；存活与否由 daemon/doctor 实测）—— 直连探活失败时会借它判「IP 真死还是本机抖动」`);
   }
 
+  // ⓪.5 代理保活模式（0.1.8）：条目被注释是设计行为，先说清楚再报 hosts 现状
+  if (!current.entries.size && current.idle.size > 0) {
+    lines.push(`代理保活模式：${current.idle.size} 个域名的直连条目已注释保活（代理停止自动无缝恢复${current.idleSince ? `，自 ${current.idleSince}` : ""}）`);
+  }
+
   // ① hosts 块现状
   const gen = generatedAt(hostsContent);
   if (!current.entries.size) {
-    // off 会主动剥块：此时不能说「先跑 install」（那是装没装的问题），要说「恢复」
-    lines.push(paused
-      ? "hosts：ghprobe 块已剥离（暂停状态，正常现象）—— 跑 ghprobe on 重新写回"
-      : "hosts：还没有 ghprobe 块 —— 先跑 ghprobe install");
+    if (current.idle.size > 0) {
+      lines.push(`hosts：条目已全部注释（保活待命，共 ${current.idle.size} 个域名，备用 IP 齐全）`);
+    } else {
+      // off 会主动剥块：此时不能说「先跑 install」（那是装没装的问题），要说「恢复」
+      lines.push(paused
+        ? "hosts：ghprobe 块已剥离（暂停状态，正常现象）—— 跑 ghprobe on 重新写回"
+        : "hosts：还没有 ghprobe 块 —— 先跑 ghprobe install");
+    }
   } else {
     lines.push(`hosts：${current.entries.size} 个域名（块生成于 ${gen ?? "?"}）`);
     for (const [d, ip] of current.entries) {

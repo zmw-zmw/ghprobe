@@ -13,13 +13,16 @@ const BEGIN = "# === ghprobe begin ===";
 const END = "# === ghprobe end ===";
 
 // 从 hosts 内容解析 ghprobe 块：有效 IP 映射、同名备选 IP、缺失域名冷却表、指纹阻断表、
-// 抖动保留表（suspect，0.1.7）
+// 抖动保留表（suspect，0.1.7）、代理保活表（idle，0.1.8）
 // 块内行格式：
 //   `IP 域名`（同域名可多行：第一条 = 主 IP，其余 = 备选）
 //   `# absent 域名 时间戳`   —— 探测过、确实没有可用 IP
 //   `# blocked 域名 时间戳`  —— 探测不可判：TCP 连上了但 TLS 被本机指纹阻断（详见 prober.js）
 //   `# suspect 域名 时间戳`  —— 直连探活失败但代理视角可达：疑似本机链路抖动，已宽限一轮；
 //                              宽限期内（algorithm.suspectGraceMs）再失败就立即动手
+//   `# proxy-idle 时间戳`    —— 保活模式标记：条目被注释（代理存活时自动启用）
+//   `# idle IP 域名`         —— 保活条目：对系统是无害注释，ghprobe 用来在代理停止时
+//                              **立即转正**（<1s 恢复直连解析，不等重测）—— 无缝切换的关键
 // 主 IP 进 entries（决策/探活只看它），备选进 extras（原样写回，供客户端 fallback）
 export function parseBlock(content) {
   const entries = new Map();
@@ -27,6 +30,8 @@ export function parseBlock(content) {
   const absent = new Map();
   const blocked = new Map();
   const suspect = new Map();
+  const idle = new Map();
+  let idleSince = null;
   let inBlock = false;
   for (const raw of String(content || "").split(/\r?\n/)) {
     const line = raw.trim();
@@ -39,7 +44,15 @@ export function parseBlock(content) {
       const mb = line.match(/^#\s+blocked\s+(\S+)\s+(\S+)/);
       if (mb) { blocked.set(mb[1].toLowerCase(), mb[2]); continue; }
       const ms = line.match(/^#\s+suspect\s+(\S+)\s+(\S+)/);
-      if (ms) { suspect.set(ms[1].toLowerCase(), ms[2]); }
+      if (ms) { suspect.set(ms[1].toLowerCase(), ms[2]); continue; }
+      const mp = line.match(/^#\s+proxy-idle\s+(\S+)/);
+      if (mp) { idleSince = mp[1]; continue; }
+      const mi = line.match(/^#\s+idle\s+(\S+)\s+(\S+)/);
+      if (mi) {
+        const domain = mi[2].toLowerCase();
+        const list = idle.get(domain) || [];
+        if (!list.includes(mi[1])) { list.push(mi[1]); idle.set(domain, list); }
+      }
       continue;
     }
     const parts = line.split(/\s+/);
@@ -52,17 +65,21 @@ export function parseBlock(content) {
       if (!list.includes(ip)) { list.push(ip); extras.set(domain, list); }
     }
   }
-  return { entries, extras, absent, blocked, suspect };
+  return { entries, extras, absent, blocked, suspect, idle, idleSince };
 }
 
-// 生成健康检查用的 hosts 块：有效条目（每域名 主 IP + 备选）+ 冷却/阻断/抖动注释
-// extras：domain -> [备选 IP...]。同域名多行让客户端在首个 IP 抖动时可自动 fallback。
-export function buildHealthBlock(entries, absent, extras = new Map(), blocked = new Map(), suspect = new Map()) {
+// 生成健康检查用的 hosts 块：有效条目（每域名 主 IP + 备选）+ 冷却/阻断/抖动注释。
+// idle=true（0.1.8 代理保活模式）：IP 行全部写成 `# idle` 注释 —— 对系统零生效
+// （不影响代理的 DNS 流程，尤其 Clash fake-ip/TUN 模式下 hosts 钉 IP 反而会绕过代理），
+// 但 ghprobe 读得回来，代理一停立即转正。extras：domain -> [备选 IP...]。
+export function buildHealthBlock(entries, absent, extras = new Map(), blocked = new Map(), suspect = new Map(), idle = false) {
   const lines = [BEGIN, `# generated ${new Date().toISOString()} by ghprobe`];
+  if (idle) { lines.push(`# proxy-idle ${new Date().toISOString()} (entries commented: proxy alive, auto-restore on proxy stop)`); }
+  const putIp = (ip, domain) => lines.push(idle ? `# idle ${ip} ${domain}` : `${ip} ${domain}`);
   for (const [domain, ip] of entries) {
-    lines.push(`${ip} ${domain}`);
+    putIp(ip, domain);
     for (const alt of extras.get(domain) || []) {
-      if (alt && alt !== ip) { lines.push(`${alt} ${domain}`); }
+      if (alt && alt !== ip) { putIp(alt, domain); }
     }
   }
   for (const [domain, ts] of absent) { lines.push(`# absent ${domain} ${ts}`); }
@@ -70,6 +87,24 @@ export function buildHealthBlock(entries, absent, extras = new Map(), blocked = 
   for (const [domain, ts] of suspect) { lines.push(`# suspect ${domain} ${ts}`); }
   lines.push(END);
   return lines.join("\n");
+}
+
+// 保活表 -> 活动条目（恢复用）：每域名第一行是主 IP，其余是备选
+export function idleToActive(idle) {
+  const entries = new Map();
+  const extras = new Map();
+  for (const [domain, ips] of idle || []) {
+    if (!ips || !ips.length) { continue; }
+    entries.set(domain, ips[0]);
+    if (ips.length > 1) { extras.set(domain, ips.slice(1)); }
+  }
+  return { entries, extras };
+}
+
+// 活动块文本 -> 保活块文本（parse + 重建，一行转换）
+export function activeBlockToIdle(block) {
+  const p = parseBlock(block);
+  return buildHealthBlock(p.entries, p.absent, p.extras, p.blocked, p.suspect, true);
 }
 
 // 合法域名全集 = 主域名 + 兜底域名；缺失检测与 orphan 清理都以它为准
@@ -316,6 +351,35 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
   const say = log || (() => {});
   const content = fs.readFileSync(hostsPath, "utf8");
   const current = parseBlock(content);
+
+  // 0.1.8 代理保活模式：条目已全部注释（# idle）。分两种情况：
+  //   · 代理还活着 -> 本轮什么都不做（daemon 按保活节流在测，别打扰）
+  //   · 代理死了   -> daemon 没来得及恢复（监督者兜底路径），**立即转正保活条目** ——
+  //     这是无缝切换的最后一道保险：哪怕 daemon 崩了，每分钟的监督任务也能在 1 分钟内恢复直连。
+  if (current.entries.size === 0 && current.idle.size > 0) {
+    let pi = null;
+    try { pi = await (deps.detectProxy || detectProxy)(cfg); } catch { pi = null; }
+    if (pi && pi.found && pi.alive) {
+      say(`代理保活模式（${pi.host}:${pi.port} 存活）：hosts 条目已注释，daemon 负责保活探测`);
+      return { action: "none", reason: "代理保活模式（条目已注释，代理存活）", block: null, stuck: [], proxied: true };
+    }
+    say("代理已停止但条目仍处于保活注释态 —— 立即恢复保活条目并重测校准");
+    const { entries, extras } = idleToActive(current.idle);
+    const block = buildHealthBlock(entries, current.absent, extras, current.blocked, current.suspect, false);
+    if (write) {
+      const lock = acquireHostsLock();
+      if (!lock) {
+        say("另一进程正在写 hosts，恢复本轮跳过（下一分钟监督任务会再试）");
+        return { action: "none", reason: "写锁冲突，恢复推迟", block, stuck: [] };
+      }
+      try {
+        const latest = fs.readFileSync(hostsPath, "utf8");
+        await (deps.applyHosts || applyHosts)(mergeHosts(latest, block), hostsPath);
+        say(`保活条目已恢复（${entries.size} 个域名）；后台继续全量重测校准`);
+      } finally { releaseHostsLock(lock); }
+    }
+    return { action: "full", reason: "代理停止，保活条目已恢复", block, stuck: [], changed: [...entries.keys()] };
+  }
 
   if (current.entries.size === 0) {
     say("hosts 无 ghprobe 记录，触发首次全量");

@@ -15,7 +15,7 @@ import path from "node:path";
 import { userDataDir, applyHosts, mergeHosts, WIN_HOSTS, isPaused } from "./hosts.js";
 import { hasLocalNetwork } from "./net.js";
 import { loadConfig } from "./config.js";
-import { parseBlock, runHealth, shouldKeepOldBlock, blockFromProbeResult } from "./health.js";
+import { parseBlock, runHealth, shouldKeepOldBlock, blockFromProbeResult, buildHealthBlock, activeBlockToIdle, idleToActive } from "./health.js";
 import { runProbe } from "./probe.js";
 import { detectProxy } from "./proxy.js";
 import { poolNeedsUpdate, updatePool } from "./pool.js";
@@ -76,26 +76,124 @@ export function nextIntervalMs(result, intervals = {}) {
 // 攒进门控的 pendingBlock；健康轮结束后由 flushPending 空闲落地。
 // deps.proxyState（0.1.7）：跨轮代理状态（runDaemon 注入持久对象）—— wasAlive 记上一轮
 // 存活。一次性调用（单测/无状态路径）不传则只测不记、无跃迁逻辑。
-// 代理「存活 -> 死亡」跃迁后的全量重测（0.1.7）。
-// 为什么是 P0：用户流量此刻正从代理落回直连，hosts 是唯一救命稻草 —— 不能等下一轮
-// 普通健康检查（它只测已写入条目，发现不了「整批该换」），必须全量重探所有域名的
-// 所有候选。也不走 algorithm 门控 —— 「用户正用浏览器」的打扰成本换不来断网。
-async function proxyDeathReprobe(cfg, log, deps = {}) {
+// ---------- 代理保活状态机（0.1.8） ----------
+// 用户语义：「开代理时把直连条目全部注释掉，低频保活探测直连 IP，代理停了无缝切回」。
+// 三个动作：
+//   进入（代理活着 & 条目还是活的）  -> 条目立即注释（# idle），注释前的条目就是初始
+//                                      standby；随后全量重测建立新鲜 standby。
+//                                      为什么注释是对的：流量已交代理，hosts 钉 IP 不仅无用，
+//                                      在 Clash fake-ip/TUN 模式下反而会绕过代理破坏分流。
+//   保活（代理持续存活）            -> 每 proxy.idleProbeMin（默认 5 分钟，远低于直连
+//                                      模式的 15~45s）全量重测一次直连候选，standby 保持新鲜；
+//                                      未到点时每轮只做一次缓存命中的代理检测，几乎零成本。
+//   恢复（存活 -> 死亡跃迁）        -> **先把 standby 注释条目立即转正（<1s，不等重测）**，
+//                                      再后台全量重测校准。恢复先于校准 —— 直连解析
+//                                      0 秒内就位，这才是「无缝切换」。
+// 纪律：全灭时绝不覆盖非空 standby（否则恢复=空恢复）；校准写入与现内容相同则跳过。
+
+// 保活探测：全量重测直连候选 -> 写成 idle 注释块。供进入/保活共用。
+async function keepwarmProbe(cfg, log, deps = {}, ps) {
   const hostsPath = deps.hostsPath || WIN_HOSTS;
-  try {
-    const r = await (deps.runProbe || runProbe)(cfg, log, null); // null = 全部域名
-    const block = blockFromProbeResult(cfg, r);
-    const latest = (deps.readHosts || ((p) => fs.readFileSync(p, "utf8")))(hostsPath);
-    if (shouldKeepOldBlock(latest, block)) {
-      log("全量重测无可用 IP（全灭护栏），保留 hosts 旧块");
-      return { action: "none", reason: "代理停止后全量重测全灭，保留旧块", offline: false, block: null, stuck: [] };
+  const readH = deps.readHosts || ((p) => fs.readFileSync(p, "utf8"));
+  const apply = deps.applyHosts || applyHosts;
+  // 到点刷池：池子新，恢复之后的重排才有宽候选可用（与直连模式同一份逻辑）
+  if (poolNeedsUpdate(cfg)) {
+    try {
+      const cur = parseBlock(readH(hostsPath));
+      const seeds = [...cur.entries.values()].concat([...cur.idle.values()].flat());
+      await updatePool(cfg, log, seeds);
+    } catch (e) {
+      log(`候选池更新失败（忽略，用现有池继续）: ${e.message}`);
     }
-    await (deps.applyHosts || applyHosts)(mergeHosts(latest, block), hostsPath);
-    log("已按直连全量重测结果写入 hosts");
-    return { action: "full", reason: "本地代理停止，全量重测直连", block, stuck: [] };
+  }
+  const r = await (deps.runProbe || runProbe)(cfg, log, null); // null = 全部域名，standby 必须全覆盖
+  const idleBlock = activeBlockToIdle(blockFromProbeResult(cfg, r));
+  if (parseBlock(idleBlock).idle.size === 0) {
+    // 全灭护栏：一个活 IP 都没有时绝不覆盖非空 standby，否则代理一停就恢复了个寂寞
+    log("保活探测全灭，保留上一份 standby 不覆盖");
+    ps.standbyAt = Date.now(); // 算作已测过一轮，别在黑洞窗口里反复空转
+    return false;
+  }
+  const latest = readH(hostsPath);
+  const merged = mergeHosts(latest, idleBlock);
+  if (merged !== latest) {
+    await apply(merged, hostsPath);
+  }
+  ps.standbyAt = Date.now();
+  return true;
+}
+
+// 进入保活：注释现有条目（立即），随后建立新鲜 standby
+async function proxyIdleEnter(cfg, log, deps = {}, ps) {
+  const hostsPath = deps.hostsPath || WIN_HOSTS;
+  const readH = deps.readHosts || ((p) => fs.readFileSync(p, "utf8"));
+  const apply = deps.applyHosts || applyHosts;
+  try {
+    const latest = readH(hostsPath);
+    const cur = parseBlock(latest);
+    if (cur.entries.size > 0) {
+      const idleBlock = buildHealthBlock(cur.entries, cur.absent, cur.extras, cur.blocked, cur.suspect, true);
+      const merged = mergeHosts(latest, idleBlock);
+      if (merged !== latest) { await apply(merged, hostsPath); }
+      log(`本地代理已启用（${ps.endpoint || "proxy"}）：hosts 条目已注释保活，停止代理将自动无缝恢复`);
+    } else {
+      log(`本地代理已启用（${ps.endpoint || "proxy"}）：进入保活模式`);
+    }
   } catch (e) {
-    log(`代理停止后的全量重测失败（下一轮自愈继续）: ${e.message}`);
-    return { action: "error", reason: `代理停止后重测失败: ${e.message}`, offline: false, block: null, stuck: [] };
+    log(`注释条目失败（不影响代理使用，下一轮重试）: ${e.message}`);
+    return { action: "error", reason: `保活进入失败: ${e.message}`, offline: false, block: null, stuck: [], proxied: true };
+  }
+  try { await keepwarmProbe(cfg, log, deps, ps); } catch (e) {
+    log(`建立 standby 失败（现有注释条目仍是可用 standby，下一轮重试）: ${e.message}`);
+  }
+  return { action: "full", reason: "进入代理保活模式（条目已注释 + standby 就位）", block: null, stuck: [], proxied: true };
+}
+
+// 持续保活：节流的全量重测
+async function proxyIdleKeepwarm(cfg, log, deps = {}, ps) {
+  try {
+    const wrote = await keepwarmProbe(cfg, log, deps, ps);
+    return { action: "full", reason: wrote ? "代理保活：standby 已按直连重测刷新" : "代理保活：重测全灭，保留旧 standby", block: null, stuck: [], proxied: true };
+  } catch (e) {
+    log(`保活探测失败（保留旧 standby，下一轮重试）: ${e.message}`);
+    return { action: "error", reason: `保活探测失败: ${e.message}`, offline: false, block: null, stuck: [], proxied: true };
+  }
+}
+
+// 代理死亡：先转正 standby（无缝），再全量重测校准
+async function proxyDeathRestore(cfg, log, deps = {}) {
+  const hostsPath = deps.hostsPath || WIN_HOSTS;
+  const readH = deps.readHosts || ((p) => fs.readFileSync(p, "utf8"));
+  const apply = deps.applyHosts || applyHosts;
+  try {
+    const latest = readH(hostsPath);
+    const cur = parseBlock(latest);
+    if (cur.idle.size > 0) {
+      const { entries, extras } = idleToActive(cur.idle);
+      const block = buildHealthBlock(entries, cur.absent, extras, cur.blocked, cur.suspect, false);
+      await apply(mergeHosts(latest, block), hostsPath);
+      log(`保活条目已立即恢复（${entries.size} 个域名）—— 直连解析已就位，后台继续重测校准`);
+    }
+  } catch (e) {
+    log(`保活条目恢复失败（将由全量重测兜底）: ${e.message}`);
+  }
+  try {
+    const r = await (deps.runProbe || runProbe)(cfg, log, null);
+    const block = blockFromProbeResult(cfg, r);
+    const latest2 = readH(hostsPath);
+    if (shouldKeepOldBlock(latest2, block)) {
+      log("全量重测无可用 IP（全灭护栏），保留已恢复条目");
+      return { action: "full", reason: "代理停止：已恢复保活条目（重测全灭，保留）", block: null, stuck: [] };
+    }
+    const merged = mergeHosts(latest2, block);
+    if (merged !== latest2) {
+      await apply(merged, hostsPath);
+      log("全量重测校准完成");
+    }
+    return { action: "full", reason: "本地代理停止：保活条目已恢复并按直连重测校准", block, stuck: [] };
+  } catch (e) {
+    log(`重测校准失败（已恢复的条目仍有效，下一轮自愈继续）: ${e.message}`);
+    return { action: "full", reason: "代理停止：已恢复保活条目（校准失败待重试）", block: null, stuck: [] };
   }
 }
 
@@ -106,20 +204,37 @@ export async function daemonCycle(cfg, log, deps = {}) {
   if ((deps.isPaused || isPaused)()) {
     return { action: "skip", reason: "已暂停（ghprobe off 恢复）", offline: false, block: null, stuck: [] };
   }
-  // 0.1.7 代理共存监测。检测失败按「无代理」处理，绝不阻断正常自愈。
-  if (cfg.proxy?.enabled !== false) {
+  // 0.1.8 代理保活状态机。需要 deps.proxyState（runDaemon 注入的跨轮持久对象）：
+  // 没有 proxyState 的一次性调用（单测/无状态路径）不碰代理逻辑 —— 一次性进程没有
+  // 跨轮记忆，做不了跃迁判断；一次性路径的兜底由 runHealth 的 idle 分支负责。
+  const ps = deps.proxyState;
+  if (cfg.proxy?.enabled !== false && ps) {
     let pi = null;
     try { pi = await (deps.detectProxy || detectProxy)(cfg); } catch { pi = null; }
     const aliveNow = Boolean(pi && pi.found && pi.alive);
-    const ps = deps.proxyState;
-    if (ps) {
-      if (ps.wasAlive === true && !aliveNow) {
-        ps.wasAlive = false;
-        log(`本地代理已停止（此前 ${ps.endpoint || "存活"}）→ 流量落回直连，立即全量重测`);
-        return proxyDeathReprobe(cfg, log, deps);
-      }
-      ps.wasAlive = aliveNow;
+    const idleModeWanted = cfg.proxy?.idleMode !== false;
+    if (ps.wasAlive === true && !aliveNow) {
+      ps.wasAlive = false;
+      log(`本地代理已停止（此前 ${ps.endpoint || "存活"}）→ 立即恢复保活条目并全量重测`);
+      return proxyDeathRestore(cfg, log, deps);
+    }
+    if (aliveNow && idleModeWanted && (ps.wasAlive === false || ps.wasAlive === undefined)) {
+      ps.wasAlive = true;
       if (pi && pi.found) { ps.endpoint = `${pi.host}:${pi.port}`; }
+      return proxyIdleEnter(cfg, log, deps, ps);
+    }
+    ps.wasAlive = aliveNow;
+    if (pi && pi.found) { ps.endpoint = `${pi.host}:${pi.port}`; }
+    if (aliveNow && idleModeWanted) {
+      // 持续保活：到点全量重测，未到点直接跳过（心跳照写，监督者不会误插手）
+      const min = (cfg.proxy?.idleProbeMin ?? 5) * 60000;
+      const age = ps.standbyAt ? Date.now() - ps.standbyAt : Infinity;
+      if (age >= min) { return proxyIdleKeepwarm(cfg, log, deps, ps); }
+      return {
+        action: "none",
+        reason: `代理保活中（${ps.endpoint || "proxy"}，下次保活探测约 ${Math.max(1, Math.ceil((min - age) / 60000))} 分钟后）`,
+        offline: false, block: null, stuck: [], proxied: true,
+      };
     }
   }
   if (!(await (deps.hasNetwork || hasLocalNetwork)(cfg))) {

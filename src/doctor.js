@@ -49,6 +49,12 @@ export function evaluateProbe(ranked, tlsBlockedDomains, cfg) {
 export function evaluateHosts(content, cfg, probed = true) {
   const current = parseBlock(content);
   const n = current.entries.size;
+  if (n === 0 && current.idle.size > 0) {
+    // 0.1.8 代理保活模式：条目被注释不是「没装好」，是代理共存设计 —— 单独说清楚
+    return { state: current, checks: [check("hosts", "hosts 写入状态", "info",
+      `代理保活模式：${current.idle.size} 个域名的直连条目已注释（检测到本地代理存活时自动启用）`,
+      "停止代理后 ghprobe 会自动把保活条目转正（无缝恢复直连）；不想要此模式可配置 proxy.idleMode: false")] };
+  }
   if (n === 0) {
     return { state: current, checks: [check("hosts", "hosts 写入状态", probed ? "fail" : "info",
       "hosts 里还没有 ghprobe 块",
