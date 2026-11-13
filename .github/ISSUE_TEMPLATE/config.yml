@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用疑问 / 讨论
+    url: https://github.com/zmw-zmw/ghprobe/discussions
+    about: 不确定是不是 bug？先来 Discussions 问。

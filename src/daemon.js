@@ -12,7 +12,7 @@
 //   · daemon 崩溃 -> 下一分钟监督者自动复活它；旧版本 npm 用户没有心跳文件，行为完全不变
 import fs from "node:fs";
 import path from "node:path";
-import { userDataDir, applyHosts, mergeHosts, WIN_HOSTS } from "./hosts.js";
+import { userDataDir, applyHosts, mergeHosts, WIN_HOSTS, isPaused } from "./hosts.js";
 import { hasLocalNetwork } from "./net.js";
 import { loadConfig } from "./config.js";
 import { parseBlock, runHealth, shouldKeepOldBlock } from "./health.js";
@@ -72,6 +72,12 @@ export function nextIntervalMs(result, intervals = {}) {
 // deps.gate（0.6.0）：用户行为门控 —— 非紧急写入在「用户正用浏览器」时被推迟，
 // 攒进门控的 pendingBlock；健康轮结束后由 flushPending 空闲落地。
 export async function daemonCycle(cfg, log, deps = {}) {
+  // ghprobe off 后：不探测、不写 hosts。暂停检查必须放在最前 —— 连「断网跳过」都
+  // 不能先判，off 语义是「先别动我的网络」，探测请求本身也不该发。
+  // deps.isPaused 可注入（单测不碰真实用户目录）。
+  if ((deps.isPaused || isPaused)()) {
+    return { action: "skip", reason: "已暂停（ghprobe off 恢复）", offline: false, block: null, stuck: [] };
+  }
   if (!(await (deps.hasNetwork || hasLocalNetwork)(cfg))) {
     return { action: "skip", reason: "本地无网络连接", offline: true, block: null, stuck: [] };
   }

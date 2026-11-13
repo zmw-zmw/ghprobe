@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseBlock, targetDomains } from "./health.js";
-import { userDataDir, WIN_HOSTS } from "./hosts.js";
+import { userDataDir, WIN_HOSTS, isPaused } from "./hosts.js";
 import { readHeartbeat, heartbeatFresh, processAlive } from "./daemon.js";
 
 export function healthLogPath() {
@@ -28,15 +28,24 @@ function generatedAt(content) {
 }
 
 // 纯函数：由既有状态组装速查报告。全离线 —— 不探测、不解析、不查任务网络。
-export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null, daemon = undefined }) {
+export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task = null, daemon = undefined, paused = false }) {
   const current = parseBlock(hostsContent);
   const targets = targetDomains(cfg);
   const lines = [];
 
+  // ⓪ 暂停状态优先展示：off 会剥掉 hosts 块，如果不提示，下面「还没有 ghprobe 块」
+  // 的文案会误导用户以为没装好
+  if (paused) {
+    lines.push("状态：已暂停（ghprobe off）—— hosts 块已剥离，自愈停止写入；跑 ghprobe on 恢复");
+  }
+
   // ① hosts 块现状
   const gen = generatedAt(hostsContent);
   if (!current.entries.size) {
-    lines.push("hosts：还没有 ghprobe 块 —— 先跑 ghprobe install");
+    // off 会主动剥块：此时不能说「先跑 install」（那是装没装的问题），要说「恢复」
+    lines.push(paused
+      ? "hosts：ghprobe 块已剥离（暂停状态，正常现象）—— 跑 ghprobe on 重新写回"
+      : "hosts：还没有 ghprobe 块 —— 先跑 ghprobe install");
   } else {
     lines.push(`hosts：${current.entries.size} 个域名（块生成于 ${gen ?? "?"}）`);
     for (const [d, ip] of current.entries) {
@@ -83,6 +92,7 @@ export async function runStatus(cfg, deps = {}) {
   const hostsContent = deps.hostsContent ?? (() => { try { return fs.readFileSync(WIN_HOSTS, "utf8"); } catch { return ""; } })();
   const logTail = deps.logTail ?? readLogTail();
   const task = deps.taskQuery ? await deps.taskQuery() : null;
-  const lines = buildStatusReport({ hostsContent, cfg, logTail, task });
+  const paused = deps.paused ?? isPaused();
+  const lines = buildStatusReport({ hostsContent, cfg, logTail, task, paused });
   return { lines, entries: parseBlock(hostsContent).entries.size };
 }

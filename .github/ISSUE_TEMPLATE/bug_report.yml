@@ -1,0 +1,58 @@
+name: 🐛 Bug 报告
+description: ghprobe 行为不符合预期 —— 请附上 ghprobe report 与 ghprobe doctor 的输出
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。**两份输出是定位问题的关键**，没有它们基本只能盲猜：
+
+        ```bash
+        ghprobe report    # 诊断包：自动复制到剪贴板，直接粘贴
+        ghprobe doctor    # 完整自检：约 1 分钟，输出也贴上
+        ```
+
+        诊断包只含版本信息、hosts 块和自愈日志尾部，不含任何个人数据。
+  - type: input
+    id: version
+    attributes:
+      label: ghprobe 版本
+      description: `ghprobe --version` 的输出
+      placeholder: "0.1.6"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本
+      description: "如 Windows 11 24H2 / Windows 10 22H2"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 现象 + 期望行为；能复现的话给出步骤
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: ghprobe report 输出
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: ghprobe doctor 输出
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 网络环境（家宽/校园网/公司网）、是否装了其他代理或改 hosts 的工具等
+    validations:
+      required: false

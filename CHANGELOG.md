@@ -5,6 +5,38 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+> **版本号说明**：npm 发布采用 `0.1.x` 版本线（`npm i -g ghprobe` 装到的就是它）；
+> 0.1.5 及之前的 npm 包内含仓库内部 0.2~0.6 的全部能力（对应关系：npm 0.1.5 ≈ 内部 0.6.0）。
+> **自 0.1.6 起条目直接使用 npm 版本号**，内部版本号不再单独记录。
+
+## [0.1.6] - 2026-11-13
+
+### Added
+
+- **`ghprobe off` / `ghprobe on`：一键暂停与恢复（不卸载）**。off = 剥掉 hosts 块 +
+  暂停计划任务 + 落暂停标记，daemon / 健康检查见到标记直接跳过（连探测请求都不发）；
+  on = 反向恢复并当场触发一轮健康检查，约 1 分钟内重新写好 hosts。
+  适合出差、换网、临时装了代理工具的场景，不用整个 uninstall。
+  手动 `probe --apply` 是显式意图不受门约束，但会提示当前处于暂停状态。
+- **`ghprobe report`：报障诊断包**。版本 / 系统 / 暂停状态 / status / 配置差异 /
+  hosts 块 / 自愈日志尾部一次收集，自动复制到剪贴板并落盘
+  （`%LOCALAPPDATA%\ghprobeeport-<时间>.txt`），提 issue 直接粘贴。
+- **更新检查**：交互命令（install / status / doctor / probe / report）每天最多查一次
+  npm registry（npmmirror 优先、官方源兜底、5s 超时、失败静默），有新版提示
+  `npm i -g ghprobe`。只提示不自动升级；daemon / 计划任务静默路径绝不联网查版本。
+
+### Fixed
+
+- **自愈日志无限膨胀**（重要）：daemon / 监督者每 15~60s 追加一行，日志此前只增不减，
+  长跑机器实测可攒到几十 MB。现在追加前自动滚动：超过 2MB 只保留最后 256KB，
+  老用户升级后下次写入自动截断，无需手动清理。
+
+### Changed
+
+- `status` 在暂停状态下首行显示恢复指引；hosts 块被 off 剥掉时不再误导用户「先跑 install」。
+- `uninstall` 顺带清掉暂停标记（重装 = 全新开始）。
+
+
 ## [0.6.0] - 2026-10-31
 
 ### Added

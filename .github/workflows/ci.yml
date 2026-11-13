@@ -38,7 +38,15 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org/'
       - run: npm install --no-fund --no-audit
-      - run: npm publish
+      # NPM_TOKEN secret 未配置时自跳过（此时维护者本地 npm publish 兜底），
+      # 避免 publish 红 X 遮住真正的测试结果；配好 secret 后自动恢复全自动发版。
+      - name: publish to npm
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret 未配置，跳过自动发布（请本地 npm publish 兜底）"
+            exit 0
+          fi
+          npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "ghprobe $GITHUB_REF_NAME"

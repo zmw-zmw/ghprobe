@@ -22,6 +22,7 @@
 ```bash
 npm install -g ghprobe
 ghprobe install     # 探测一次 + 写入 hosts + 注册每分钟健康检查（全程只弹一次 UAC）
+ghprobe off         # 暂停：剥掉 hosts 块 + 停止自愈写入（不卸载；恢复用 ghprobe on）
 ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 ```
 
@@ -360,6 +361,15 @@ ghprobe health --apply      # 检测到异常时写入系统 hosts（会弹 UAC�
 # GitHub 连不上不知道哪坏了？先跑它。有 fail 项时退出码非零，方便脚本判断
 ghprobe doctor
 
+# 暂停 / 恢复（不卸载）：off = 剥掉 hosts 块 + 暂停计划任务 + 停止自愈写入，
+# 出差、换网、临时不想用时不用整个卸载；on = 恢复并当场触发一轮健康检查
+ghprobe off
+ghprobe on
+
+# 报障诊断包：版本 / status / 配置差异 / hosts 块 / 日志尾部，
+# 自动复制到剪贴板并落盘 —— 提 issue 时直接粘贴，报障成本最低
+ghprobe report
+
 # 从 GitHub 官方 api.github.com/meta 更新候选池缓存（每天一次即可）
 # 该 API 未认证限 60 次/小时，所以别频繁调；health 到点也会自动调，一般不用手动
 ghprobe update-pool
@@ -469,16 +479,19 @@ schedule:
 ```
 
 
-### 卸载 / 回滚与日志
+### 卸载 / 暂停 / 回滚与日志
 
 ```bash
+ghprobe off                    # 暂停：剥掉 hosts 块 + 暂停计划任务 + 停止自愈（不卸载）
+ghprobe on                     # 恢复：清暂停标记 + 恢复计划任务 + 当场触发一轮健康检查
 ghprobe uninstall              # 删除计划任务 + 还原 hosts（只删自己的行）
 ```
 
 如果你是用 `install.ps1` 部署的，也可以用 `.\install.ps1 -Uninstall`。
 
+- **只是临时不想用**（出差、换网络环境、装了别的代理工具）：用 `ghprobe off`，不用卸载 —— GitHub 立刻回到系统默认解析，自愈完全停手；`ghprobe on` 一键恢复（约 1 分钟内重新写好 hosts）。
 - **手动回滚 hosts**：写入前会备份到 `C:\Windows\System32\drivers\etc\hosts.ghprobe-bak`；但更推荐用 `ghprobe uninstall`（它按块剥离，不会误伤第三方后来追加的条目）。
-- **健康检查日志**：`%LOCALAPPDATA%\ghprobe\ghprobe.log`。计划任务静默运行、stdout/stderr 都被丢弃，所以每轮结果会追加到这里（含 `action` / `reason` / `changed`），跑挂了能查。
+- **健康检查日志**：`%LOCALAPPDATA%\ghprobe\ghprobe.log`。计划任务静默运行、stdout/stderr 都被丢弃，所以每轮结果会追加到这里（含 `action` / `reason` / `changed`），跑挂了能查。日志**自动滚动**：超过 2MB 只保留最后 256KB，不会无限膨胀（0.1.6 起；此前长跑机器能攒出几十 MB，升级后下次写入自动截断）。
 - **用户配置**：`%LOCALAPPDATA%\ghprobe\config.yaml`（可编辑，见上一节）。
 - **候选池缓存**：`%LOCALAPPDATA%\ghprobe\pool.cache.json`（`update-pool` 自动维护，不用手改）。
 - **部署日志**：用 `install.ps1` 时默认写到 `%TEMP%\ghprobe-deploy.log`。
@@ -558,6 +571,12 @@ ghprobe install -c my.yaml
 
 **Q：为什么有时候修不好？**  
 工具只能找到**当前网络、当前时刻**可用的 IP。如果遇到的是 SNI 主机名黑名单（换 IP 修不了）或 IP 黑洞，可能所有候选都不可用。此时会命中兜底链（如果配了），或者触发全灭护栏 —— **保留旧 IP、不写空块**，绝不会硬塞一个错误 IP 进去。
+
+**Q：点了 GitHub 一开始没反应，过一会又自己好了？**  
+这是**链路抖动 + 客户端自动兜底**在工作，不是坏了。ghprobe 每个域名写 2 条 IP（主 + 备选）：首条恰好在分钟级的抖动窗口里被拦时，浏览器 / git 会自动去试备选（代价是多等一个连接超时，所以「没反应」一下）；两条同时失效的话，常驻自愈 15~45s 内换 IP。「没反应」持续超过一分钟才需要管：跑 `ghprobe status` 看 hosts 与自愈日志，不行再 `ghprobe doctor` 定位。
+
+**Q：遇到问题怎么报？**  
+先跑 `ghprobe report`（生成诊断包并复制到剪贴板）和 `ghprobe doctor`，把两份输出贴到 <https://github.com/zmw-zmw/ghprobe/issues>。诊断包只含版本信息、hosts 块和自愈日志尾部，**不含任何个人数据**。
 
 **Q：会不会影响别的软件？**  
 不会。它**只写 hosts 文件**，不装代理、不改系统代理设置、不劫持流量。而且只操作 `# === ghprobe begin/end ===` 之间属于它自己的那一块，**你原有的 hosts 条目和第三方工具写的条目都不会被改动**；卸载时也只剥掉自己的块。

@@ -17,6 +17,63 @@ export function userDataDir() {
   return path.join(base, "ghprobe");
 }
 
+// ---------- 暂停（ghprobe off / on，0.1.6） ----------
+// off 的语义是「先别动我的网络」，不是卸载：剥掉 hosts 块 + 暂停计划任务 + 落暂停标记。
+// daemon / health 见到标记直接跳过，不再探测也不写 hosts；on 反之并当场触发一轮。
+// 标记文件必须是第一动作 —— off 和计划任务正在跑的一轮是并发的，先落标记才能保证
+// 「正在跑的那轮也看到暂停」，不会出现 off 刚剥完块又被那一轮写回去。
+
+// 暂停标记路径（dir 可注入供单测，不碰真实用户目录）
+export function pausedFlagPath(dir = userDataDir()) {
+  return path.join(dir, "paused");
+}
+
+export function isPaused(file = pausedFlagPath()) {
+  try { return fs.existsSync(file); } catch { return false; }
+}
+
+export function setPaused(paused, file = pausedFlagPath()) {
+  try {
+    if (paused) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${new Date().toISOString()}\n`);
+    } else {
+      fs.rmSync(file, { force: true });
+    }
+    return true;
+  } catch { return false; }
+}
+
+// ---------- 日志滚动（0.1.6） ----------
+// daemon/监督者每 15~60s 追加一行日志，此前只增不减 —— 长跑机器会无限膨胀
+// （2026-11-13 实测一台装了几天没动的机器已经 33MB）。滚动策略：超过 max 字节就把
+// 文件截成「保留最后 keep 字节」，控制权交还给追加方，不需要额外的滚动进程。
+export const LOG_MAX_BYTES = 2 * 1024 * 1024;   // 超过就滚
+export const LOG_KEEP_BYTES = 256 * 1024;       // 滚动时保留的尾部
+
+export function rotateLogIfNeeded(file, opts = {}) {
+  const max = opts.max ?? LOG_MAX_BYTES;
+  const keep = opts.keep ?? LOG_KEEP_BYTES;
+  let st;
+  try { st = fs.statSync(file); } catch { return false; }
+  if (st.size <= max) { return false; }
+  try {
+    const start = Math.max(0, st.size - keep);
+    const fh = fs.openSync(file, "r");
+    let buf;
+    try {
+      buf = Buffer.alloc(st.size - start);
+      fs.readSync(fh, buf, 0, buf.length, start);
+    } finally { fs.closeSync(fh); }
+    // 起点大概率落在半行上，掐掉第一行残片，避免留下一条读不懂的脏日志
+    const text = buf.toString("utf8").replace(/^[^\r\n]*\r?\n/, "");
+    const tmp = `${file}.rotating`;
+    fs.writeFileSync(tmp, "\ufeff" + text, "utf8");
+    fs.renameSync(tmp, file);
+    return true;
+  } catch { return false; } // 滚动失败不影响主流程：下一轮追加时再试
+}
+
 // 写 hosts 跨进程锁：probe --apply 与计划任务（health --apply）可能并发，避免读改写互踩
 export const HOSTS_LOCK = path.join(os.tmpdir(), "ghprobe-hosts.lock");
 const LOCK_STALE_MS = 60000;
@@ -115,6 +172,32 @@ export function buildUninstallTaskScript(taskName = "ghprobe") {
     + ` { [Console]::Error.WriteLine('计划任务 ${taskName} 不存在，跳过'); exit 0 };`
     + ` try { Unregister-ScheduledTask -TaskName '${taskName}' -Confirm:$false -ErrorAction Stop }`
     + ` catch { [Console]::Error.WriteLine('删除计划任务失败: ' + $_.Exception.Message); exit 1 };`
+    + ` exit 0`;
+}
+
+// 构造「暂停/恢复计划任务」的提权脚本（ghprobe off / on 用）。任务不存在直接 exit 0（幂等）：
+// off 在没安装过的机器上跑不应报错；重复 off/on 同样幂等。
+// 与 buildUninstallTaskScript 同一条纪律：动作必须 -ErrorAction Stop，否则「拒绝访问」
+// 这类非终止错误会把失败伪装成 exit 0。
+export function buildPauseTaskScript(paused, taskName = "ghprobe") {
+  const verb = paused ? "Disable" : "Enable";
+  const cn = paused ? "暂停" : "恢复";
+  return `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {};`
+    + ` if (-not (Get-ScheduledTask -TaskName '${taskName}' -ErrorAction SilentlyContinue))`
+    + ` { [Console]::Error.WriteLine('计划任务 ${taskName} 不存在，跳过'); exit 0 };`
+    + ` try { ${verb}-ScheduledTask -TaskName '${taskName}' -ErrorAction Stop | Out-Null }`
+    + ` catch { [Console]::Error.WriteLine('${cn}计划任务失败: ' + $_.Exception.Message); exit 1 };`
+    + ` exit 0`;
+}
+
+// 构造「立即触发一轮健康检查」的提权脚本（ghprobe on 用）：恢复后不等下一个间隔，
+// 当场跑一轮 —— on 之后用户应该在一分钟内看到 hosts 重新写好，而不是干等。
+export function buildStartTaskScript(taskName = "ghprobe") {
+  return `try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {};`
+    + ` if (-not (Get-ScheduledTask -TaskName '${taskName}' -ErrorAction SilentlyContinue))`
+    + ` { [Console]::Error.WriteLine('计划任务 ${taskName} 不存在，跳过'); exit 0 };`
+    + ` try { Start-ScheduledTask -TaskName '${taskName}' -ErrorAction Stop }`
+    + ` catch { [Console]::Error.WriteLine('触发计划任务失败: ' + $_.Exception.Message); exit 1 };`
     + ` exit 0`;
 }
 

@@ -1,0 +1,17 @@
+name: 💡 功能建议
+description: 希望 ghprobe 增加或改进什么
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 先说场景与痛点，再说你期望的行为
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 现在是怎么凑合的
+      validations:
+        required: false

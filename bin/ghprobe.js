@@ -13,9 +13,10 @@ import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
 import { runHealth, blockFromProbeResult, shouldKeepOldBlock, parseBlock } from "../src/health.js";
 import { runDoctor, formatReport, queryTask } from "../src/doctor.js";
-import { runStatus } from "../src/status.js";
+import { runStatus, readLogTail } from "../src/status.js";
 import { runDaemon, readHeartbeat, heartbeatFresh, daemonRunning } from "../src/daemon.js";
-import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir } from "../src/hosts.js";
+import { mergeHosts, applyHosts, restoreHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock, runElevated, buildUninstallTaskScript, buildInstallScript, buildHiddenRunnerVbs, userDataDir, isPaused, setPaused, buildPauseTaskScript, buildStartTaskScript, rotateLogIfNeeded } from "../src/hosts.js";
+import { maybeNotifyUpdate } from "../src/updates.js";
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
@@ -47,6 +48,8 @@ function appendRawLog(line) {
   try {
     const f = healthLogPath();
     fs.mkdirSync(path.dirname(f), { recursive: true });
+    // 追加前先滚动：日志只增不减的话，长跑机器几个月能攒出几十 MB（0.1.6 前实测 33MB）
+    rotateLogIfNeeded(f);
     const prefix = fs.existsSync(f) ? "" : "\ufeff";
     fs.appendFileSync(f, prefix + line);
   } catch { /* 日志写失败不影响主流程 */ }
@@ -83,6 +86,11 @@ const program = new Command();
 const PKG = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"));
 program.name("ghprobe").description("GitHub 直连优选：本地 DoH + TLS 证书终审探测 + hosts 生成（无代理）").version(PKG.version);
 
+// 交互命令开头的版本提示（内部每天最多查一次 registry；只提示不自动升级，失败静默）
+function notifyUpdate() {
+  return maybeNotifyUpdate(PKG.version, console.log);
+}
+
 // 打印一轮结果的可读摘要
 function printSummary(r) {
   for (const [domain, rs] of r.ranked) {
@@ -99,6 +107,7 @@ program.command("doctor")
   .description("一键自检：网络 / DoH / 探测 / hosts / 计划任务，人话结论 + 下一步建议")
   .option("-c, --config <path>", "用户配置覆盖")
   .action(async (opts) => {
+    await notifyUpdate();
     const cfg = loadConfig(opts.config);
     console.error("ghprobe 自检中（跑一轮完整探测，约 1 分钟）…");
     const r = await runDoctor(cfg, (m) => console.error(m));
@@ -119,6 +128,7 @@ program.command("status")
   .description("秒级速查：hosts 现状 + 自愈日志尾部 + 计划任务（不打任何网络请求）")
   .option("-c, --config <path>", "用户配置覆盖")
   .action(async (opts) => {
+    await notifyUpdate();
     const cfg = loadConfig(opts.config);
     const r = await runStatus(cfg, { taskQuery: () => queryTask() });
     console.log(r.lines.join("\n"));
@@ -140,10 +150,15 @@ program.command("probe")
     if (opts.json) {
       const out = { at: r.at, domains: [...r.ranked].map(([d, rs]) => ({ domain: d, alive: rs.map((x) => ({ ip: x.ip, tcpMs: x.tcpMs, tlsMs: x.tlsMs, ttfb: x.ttfb, score: x.score })) })), extra: [...r.extra].map(([d, rs]) => ({ domain: d, alive: rs.map((x) => x.ip) })) };
       console.log(JSON.stringify(out, null, 2));
-    } else {
-      printSummary(r);
+      return; // JSON 是给脚本消费的，不掺提示行
     }
+    await notifyUpdate();
+    printSummary(r);
     if (opts.apply) {
+      // 显式命令不受暂停门约束（那是给自动化设的），但要提醒用户自动化还停着
+      if (isPaused()) {
+        console.error("注意：当前处于暂停状态（ghprobe off），本轮按你的显式要求仍写入 hosts；恢复自动化跑 ghprobe on");
+      }
       const lock = acquireHostsLock();
       if (!lock) {
         console.error("另一进程正在写 hosts，本轮跳过（下轮健康检查会自动补写）");
@@ -188,6 +203,12 @@ program.command("health")
   .option("-a, --apply", "检测到异常时写入系统 hosts（会弹 UAC）")
   .option("-f, --force", "跳过 daemon 监督逻辑，本轮亲自跑（诊断用）")
   .action(async (opts) => {
+    // ghprobe off 后自愈彻底停手：不探测、不写 hosts、不拉 daemon（标记由 off/on 维护）
+    if (isPaused()) {
+      console.error("ghprobe 处于暂停状态（ghprobe off），本轮跳过 —— 恢复跑 ghprobe on");
+      writeHealthLog("skip", "已暂停（ghprobe off），本轮不探测不写 hosts");
+      return;
+    }
     let cfg = loadConfig(opts.config);
     // 0.5.0 监督者逻辑：daemon 心跳新鲜 -> 秒退（它在干活，重复探测纯属浪费）；
     // 心跳陈旧/没有 -> 拉起新 daemon（分离进程），本轮仍照常执行，作为 daemon 就位前的兜底。
@@ -231,6 +252,7 @@ program.command("install")
   .option("-c, --config <path>", "用户配置覆盖（间隔取 schedule.healthMin 分钟）")
   .option("--skip-probe", "只注册计划任务，不立即探测写 hosts（等下一次定时触发）")
   .action(async (opts) => {
+    await notifyUpdate();
     // 生成用户可编辑的配置文件（已存在则不覆盖，保留用户改动）
     const ucfg = ensureUserConfig();
     const cfg = loadConfig(opts.config);
@@ -297,9 +319,55 @@ program.command("install")
     console.log("停止：ghprobe uninstall");
   });
 
+program.command("off")
+  .description("一键暂停：剥掉 hosts 块 + 暂停计划任务 + 落暂停标记（自愈停止写入）。GitHub 回到系统默认解析；恢复用 ghprobe on")
+  .action(async () => {
+    // 先落标记：off 与计划任务正在跑的一轮是并发的，标记是第一动作才能保证
+    // 正在跑的那轮也看到暂停，不会刚剥完块又被那一轮写回去
+    setPaused(true);
+    let taskOk = true;
+    try {
+      const r = await runElevated(buildPauseTaskScript(true));
+      if (r.code !== 0) { taskOk = false; console.error(`暂停计划任务失败: ${r.err || r.out}`); }
+    } catch (e) { taskOk = false; console.error(`暂停计划任务失败: ${e.message}`); }
+    try {
+      await restoreHosts();
+      console.log("已暂停：hosts 块已剥离、DNS 缓存已刷新，GitHub 恢复系统默认解析");
+    } catch (e) {
+      console.error(`剥离 hosts 块失败: ${e.message}（暂停标记已落，自动化不会再写入；hosts 里可能还残留 ghprobe 条目，可手动删或重跑 ghprobe off）`);
+      process.exitCode = 1;
+    }
+    if (taskOk) { console.log("计划任务已暂停，常驻自愈停止写入"); }
+    console.log("恢复：ghprobe on（当场触发一轮健康检查，约 1 分钟内重新写好 hosts）");
+    if (!taskOk) { process.exitCode = 1; }
+  });
+
+program.command("on")
+  .description("恢复（ghprobe off 的逆操作）：清暂停标记 + 恢复计划任务 + 当场触发一轮健康检查")
+  .action(async () => {
+    setPaused(false);
+    let ok = true;
+    try {
+      const r = await runElevated(buildPauseTaskScript(false));
+      if (r.code !== 0) { ok = false; console.error(`恢复计划任务失败: ${r.err || r.out}`); }
+    } catch (e) { ok = false; console.error(`恢复计划任务失败: ${e.message}`); }
+    if (ok) {
+      try {
+        const r = await runElevated(buildStartTaskScript());
+        if (r.code !== 0) { console.error(`当场触发失败: ${r.err || r.out}（不致命，下一个间隔任务会自动跑）`); }
+        else { console.log("已当场触发一轮健康检查，约 1 分钟内 hosts 重新写好"); }
+      } catch (e) { console.error(`当场触发失败: ${e.message}（不致命，下一个间隔任务会自动跑）`); }
+    } else {
+      process.exitCode = 1;
+    }
+    console.log("已恢复：ghprobe 自动自愈回到工作状态");
+  });
+
 program.command("uninstall")
   .description("删除 ghprobe 计划任务并还原 hosts")
   .action(async () => {
+    // 暂停标记一并清掉：重装 = 全新开始，不要把上一次的 off 状态带进新装
+    setPaused(false);
     // 两步互相独立：任一步失败都不影响另一步，最后统一置 exitCode
     try {
       await restoreHosts();
@@ -368,6 +436,70 @@ program.command("config-diff")
     }
     console.log("\n想让某处跟随新默认：把用户配置里对应的键**删掉**即可（没被改过的键会自动跟随默认）。");
     console.log(`配置文件：${userConfigPath()}`);
+  });
+
+program.command("report")
+  .description("生成报障诊断包：版本/系统/暂停状态/status/配置差异/hosts 块/日志尾部，复制到剪贴板并落盘（贴 issue 用）")
+  .option("-o, --out <path>", "诊断包写入路径（默认 %LOCALAPPDATA%\\ghprobe\\report-<时间>.txt）")
+  .action(async (opts) => {
+    await notifyUpdate();
+    const cfg = loadConfig();
+    const lines = [];
+    lines.push(`ghprobe ${PKG.version} report`);
+    lines.push(`node ${process.version} / ${process.platform} / os=${os.release()} / ${new Date().toISOString()}`);
+    lines.push(`暂停状态：${isPaused() ? "已暂停（ghprobe off）" : "正常"}`);
+    lines.push("");
+    lines.push("== status ==");
+    try {
+      const r = await runStatus(cfg, { taskQuery: () => queryTask() });
+      lines.push(...r.lines);
+    } catch (e) { lines.push(`status 失败: ${e.message}`); }
+    lines.push("");
+    lines.push("== config-diff ==");
+    try {
+      const { hasUser, diff } = configDiff();
+      lines.push(hasUser ? (diff.length ? `用户配置与默认有 ${diff.length} 处差异：${diff.map((d) => d.key).join(", ")}` : "用户配置与当前默认一致") : "无用户配置（还没跑过 install）");
+    } catch (e) { lines.push(`config-diff 失败: ${e.message}`); }
+    lines.push("");
+    lines.push("== hosts 块 ==");
+    try {
+      const cur = readFileSync(WIN_HOSTS, "utf8");
+      const m = cur.match(/# === ghprobe begin ===[\s\S]*?(?:# === ghprobe end ===|$)/);
+      lines.push(m ? m[0].trimEnd() : "(无 ghprobe 块)");
+    } catch (e) { lines.push(`hosts 读取失败: ${e.message}`); }
+    lines.push("");
+    lines.push("== 自愈日志尾部（最近 50 行） ==");
+    const tail = readLogTail(50);
+    if (tail.length) { lines.push(...tail); } else { lines.push("(暂无日志)"); }
+    lines.push("");
+    lines.push("== 下一步 ==");
+    lines.push("再跑一次 `ghprobe doctor`，把它的输出也贴进 issue（约 1 分钟，report 里放不下探测过程）。");
+    const text = lines.join("\r\n") + "\r\n";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const out = opts.out || path.join(userDataDir(), `report-${stamp}.txt`);
+    try {
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      fs.writeFileSync(out, text, "utf8");
+    } catch (e) {
+      console.error(`诊断包落盘失败: ${e.message}`);
+      process.exitCode = 1;
+    }
+    // 尝试复制到剪贴板：失败不影响落盘（诊断包已在文件里）
+    let copied = false;
+    try {
+      await new Promise((resolve) => {
+        const child = spawn("clip", [], { stdio: ["pipe", "ignore", "ignore"] });
+        child.on("error", () => resolve());
+        child.on("close", () => { copied = true; resolve(); });
+        child.stdin.on("error", () => { /* clip 不存在时 write 会 emit，别让它炸进程 */ });
+        child.stdin.write(text);
+        child.stdin.end();
+        setTimeout(resolve, 3000); // clip 偶发不回 close，兜底别挂着
+      });
+    } catch { /* 复制失败不影响落盘 */ }
+    console.log(copied
+      ? `诊断包已复制到剪贴板（可直接粘贴进 issue），同时写在 ${out}`
+      : `诊断包已写入 ${out}（剪贴板复制不可用，请手动打开复制）`);
   });
 
 program.parseAsync();
