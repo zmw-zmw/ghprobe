@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 一轮完整探测：DoH 候选 + 内置池 -> 三关并发探测 -> 排名 -> 兜底轮
-import { resolveAll } from "./doh.js";
+import { resolveAll, resolveAllUdp } from "./doh.js";
 import { probeIp, pool } from "./prober.js";
 import { rank, neededFallbacks, mergeSamples } from "./ranker.js";
 
@@ -24,15 +24,25 @@ async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "
   return Promise.all(domains.map(async (domain) => {
     say(prefix ? `${prefix}探测 ${domain}` : `解析 ${domain}`);
     const { ips } = await resolveAll(cfg.doh, domain, cfg.timeouts.dohMs);
+    // 0.1.9 UDP 传统 DNS 补充源：114/119.29.29.29 等只有 UDP 53（443 无 DoH，实测），
+    // 答案可能被污染，但三关探测的 TLS 证书终审会把污染 IP 淘汰 —— UDP 只负责拉宽候选面。
+    // 排在 DoH 之后合并再限额：DoH 答案优先，UDP 填补剩余名额。
+    let udpIps = [];
+    if (cfg.dohUdp?.enabled !== false && Array.isArray(cfg.dohUdp?.servers) && cfg.dohUdp.servers.length) {
+      try {
+        const u = await resolveAllUdp(cfg.dohUdp.servers, domain, cfg.dohUdp.timeoutMs ?? 2000);
+        udpIps = u.ips;
+      } catch { /* UDP 源失败不致命：DoH + 内置池照常 */ }
+    }
     // 🔴 两个来源**各自限额后再合并**，绝不能对合并结果做总限额。
     // 实测（2026-10）：DoH 对 github.com 返回的 8 条里有一半是 Fastly 的 185.199.x.x
     // ——那是 githubusercontent 的节点，根本不给 github.com 服务。按总限额截断时，
     // 内置池会被这堆垃圾整个挤掉，于是出现「20.29.134.23 明明是活的，工具却报
     // stuck=github.com」。分开限额后内置池一定拿得到名额。
-    const fromDoh = (ips || []).slice(0, cfg.probe.maxCandidates);
+    const fromDoh = [...new Set([...(ips || []), ...udpIps])].slice(0, cfg.probe.maxCandidates);
     const fromPool = usePool ? poolsForDomain(cfg, domain).slice(0, cfg.probe.maxPoolIps ?? 12) : [];
     const candidates = [...new Set([...fromDoh, ...fromPool])];
-    say(`  候选 ${candidates.length} 个: ${candidates.join(", ")}`);
+    say(`  候选 ${candidates.length} 个（DoH ${ips?.length ?? 0} + UDP ${udpIps.length} + 池 ${fromPool.length}）: ${candidates.join(", ")}`);
     return { domain, candidates };
   }));
 }

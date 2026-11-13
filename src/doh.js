@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
-// DoH 联邦解析：RFC 8484 wire format，端点 IP 直连，无任何 UDP53 路径
+// DoH 联邦解析：RFC 8484 wire format，端点 IP 直连 + UDP 传统 DNS 补充源（0.1.9）
+// UDP 补充源为什么明知可能被污染还要查：它只负责「把候选面拉宽」，不负责答案可信 ——
+// 下游三关探测的 TLS 证书终审会淘汰污染 IP，污染答案进不了 hosts。
 import https from "node:https";
+import dgram from "node:dgram";
 
 // 构造最小 DNS A 查询报文：header(12) + QNAME 标签串 + 根0 + QTYPE=A + QCLASS=IN
 export function buildQuery(id, name) {
@@ -83,6 +86,52 @@ export function queryDoh(ep, name, timeoutMs) {
 // 联邦查询：全部端点并发，成功者取并集去重
 export async function resolveAll(endpoints, name, timeoutMs) {
   const rs = await Promise.all(endpoints.map((ep) => queryDoh(ep, name, timeoutMs)));
+  const ips = new Set();
+  for (const r of rs) { for (const ip of r.ips) { ips.add(ip); } }
+  return { ips: [...ips], sources: rs };
+}
+
+// ---------- UDP 传统 DNS 补充源（0.1.9） ----------
+// 114.114.114.114 / 119.29.29.29 / 180.76.76.76 这些经典公共 DNS 只开 UDP 53，
+// 没有任何 443 DoH（2026-11-14 实测 TCP 全不通）—— 但作为**补充答案源**依然有价值：
+// 它们与 DoH 厂商的 anycast 是不同解析器，返回的 CDN 映射往往不同段。
+// 报文与 DoH 同构（RFC 1035）：buildQuery 构造、parseA 解析，直接复用。
+export function queryUdp(server, name, timeoutMs, port = 53) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const qid = (Math.random() * 65536) | 0;
+    const qbuf = buildQuery(qid, name);
+    const sock = dgram.createSocket("udp4");
+    let settled = false;
+    const done = (ok, ips, err) => {
+      if (settled) { return; }
+      settled = true;
+      clearTimeout(timer);
+      try { sock.close(); } catch { /* 已关 */ }
+      resolve({ server, ok, ms: Date.now() - t0, ips, err: err || "" });
+    };
+    const timer = setTimeout(() => done(false, [], "timeout"), timeoutMs);
+    sock.on("message", (msg) => {
+      if (msg.length < 12) { done(false, [], "short response"); return; }
+      const rid = msg.readUInt16BE(0);
+      if (rid !== qid) { done(false, [], "id mismatch"); return; } // 错位响应直接丢弃
+      const rcode = msg[3] & 0x0f;
+      done(rcode === 0, rcode === 0 ? parseA(msg) : [], rcode === 0 ? "" : `rcode ${rcode}`);
+    });
+    sock.on("error", (e) => done(false, [], String(e.code || e.message).slice(0, 60)));
+    sock.send(qbuf, port, server, (e) => { if (e) { done(false, [], String(e.code || e.message).slice(0, 60)); } });
+  });
+}
+
+// UDP 联邦查询：全部服务器并发，成功者取并集去重（与 resolveAll 同构）。
+// 服务器条目支持 "ip" 或 "ip:port"（port 缺省 53）。
+export async function resolveAllUdp(servers, name, timeoutMs) {
+  const targets = (servers || []).map((s) => {
+    const str = String(s);
+    const i = str.lastIndexOf(":");
+    return /^\d+\.\d+\.\d+\.\d+:\d+$/.test(str) ? { host: str.slice(0, i), port: parseInt(str.slice(i + 1), 10) } : { host: str, port: 53 };
+  });
+  const rs = await Promise.all(targets.map((t) => queryUdp(t.host, name, timeoutMs, t.port)));
   const ips = new Set();
   for (const r of rs) { for (const ip of r.ips) { ips.add(ip); } }
   return { ips: [...ips], sources: rs };

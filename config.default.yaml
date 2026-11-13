@@ -42,6 +42,16 @@ doh:
   - { name: dns360-2, host: 221.181.72.233, sni: doh.360.cn, path: /dns-query }
   - { name: dns360-3, host: 39.156.84.71, sni: doh.360.cn, path: /dns-query }
 
+# UDP 传统 DNS 补充源（0.1.9）：114 / 119.29.29.29 / 百度这些经典公共 DNS 只开 UDP 53，
+# 没有任何 443 DoH（实测 TCP 全不通），但作为**补充答案源**有价值 —— 它们与 DoH 厂商的
+# anycast 是不同解析器，返回的 CDN 映射往往不同段。答案可能被污染？没关系：ghprobe 的
+# 三关探测（TLS 证书终审）会淘汰污染 IP，污染答案进不了 hosts。UDP 只负责拉宽候选面。
+# 合并规则：DoH 答案优先占 maxCandidates 名额，UDP 填补剩余（主次分明）。
+dohUdp:
+  enabled: true
+  servers: [114.114.114.114, 119.29.29.29, 180.76.76.76]
+  timeoutMs: 2000
+
 # 内置候选 IP 池：补足 DoH 拿不到的候选。
 # 🔴 池子必须够宽，否则会出现「明明有活 IP，工具却报 stuck」——见下面 azure 段的说明。
 ipPools:
