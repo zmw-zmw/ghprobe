@@ -68,7 +68,9 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
     }
   }
   const cooling = new Set([...current.absent.keys(), ...(current.blocked || new Map()).keys()]);
-  const missing = targets.filter((d) => !current.entries.has(d) && !cooling.has(d));
+  // 保活模式下条目只是被注释(# idle),不是「未写入」—— 别用误导文案吓用户
+  const idleDomains = new Set(current.idle.keys());
+  const missing = targets.filter((d) => !current.entries.has(d) && !idleDomains.has(d) && !cooling.has(d));
   for (const [d, ts] of current.absent) { lines.push(`  [缺失] ${d}（${ts} 起冷却）`); }
   for (const [d, ts] of (current.blocked || new Map())) { lines.push(`  [阻断] ${d}（${ts} 起冷却；浏览器栈也验证过被拦，详见 README §3）`); }
   if (missing.length) { lines.push(`  [未写入] ${missing.join(", ")}（下轮健康检查自动补）`); }
