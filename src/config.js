@@ -173,3 +173,18 @@ export function ensureUserConfig() {
   } catch { /* 写不了不阻塞安装 */ }
   return p;
 }
+
+// ---------- 用户配置文件读写（预设类命令共用：lowkey / minimal） ----------
+// 读用户配置；文件不存在/解析失败返回 null
+export function readUserConfig() {
+  return readYamlSafe(userConfigPath());
+}
+
+// 写回用户配置。js-yaml dump 会丢注释 —— 三方合并只看键值，无影响；
+// 预设命令（lowkey/minimal）写入的键 off 时按路径删除，其余键原样保留。
+export function writeUserConfig(obj) {
+  const p = userConfigPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, yaml.dump(obj, { lineWidth: 120 }), "utf8");
+  return p;
+}

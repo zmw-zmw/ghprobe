@@ -8,7 +8,8 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, ensureUserConfig, userConfigPath, userConfigSnapshotPath, configDiff } from "../src/config.js";
-import { lowkeyPreset, applyLowkey, removeLowkey, isLowkey, readUserConfig, writeUserConfig } from "../src/lowkey.js";
+import { applyLowkey, removeLowkey, isLowkey, readUserConfig, writeUserConfig } from "../src/lowkey.js";
+import { applyMinimal, removeMinimal, isMinimal } from "../src/minimal.js";
 import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
 import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
@@ -481,6 +482,45 @@ program.command("lowkey")
       if (!user || !isLowkey(user)) { console.log("低调模式本来就没开，无需还原。"); return; }
       writeUserConfig(removeLowkey(user));
       console.log(`低调模式已移除，预设写入的键已全部删除（自动回落跟随默认值）。\n配置文件：${p}`);
+      return;
+    }
+    console.error("未知参数：只支持 on / off（无参数查看状态）。");
+    process.exitCode = 1;
+  });
+
+program.command("minimal")
+  .description("主站模式：只加速 GitHub 主站（domains 收敛为 github.com），其余域名全部不管——被精准黑洞的域名不再产生 stuck 噪音")
+  .argument("[action]", "on | off（无参数 = 查看当前状态）")
+  .action(async (action) => {
+    await maybeNotifyUpdate();
+    const user = readUserConfig();
+    const p = userConfigPath();
+    if (!action) {
+      if (!user) { console.log(`还没有用户配置 —— 先跑 \`ghprobe install\`。\n配置文件：${p}`); return; }
+      console.log(isMinimal(user)
+        ? `主站模式：已开启（写入于 ${user.minimal.at}）—— 只探测/只写 github.com，hosts 里的其余条目下一轮自动剥掉。`
+        : "主站模式：未开启（默认跟踪 9 个域名 + 兜底链）。`ghprobe minimal on` 一键收敛，`ghprobe minimal off` 完整还原。");
+      console.log(`配置文件：${p}`);
+      return;
+    }
+    if (action === "on") {
+      if (!user) { console.error(`还没有用户配置 —— 先跑一次 \`ghprobe install\` 生成。\n配置文件：${p}`); process.exitCode = 1; return; }
+      if (isMinimal(user)) { console.log("主站模式已开启，无需重复写入（off 可还原）。"); return; }
+      writeUserConfig(applyMinimal(user));
+      console.log([
+        "主站模式已写入用户配置：",
+        "  - 只探测/只写 github.com（git clone、浏览器主站、git push 全走它）",
+        "  - 其余域名（api/ssh/codeload/githubusercontent 系/githubassets）不再跟踪，",
+        "    hosts 里的旧条目下一轮 health 自动剥掉；其兜底域名（jsdelivr）也随之退场",
+        "daemon 每轮重载配置，改完即生效，不用重启。",
+        "`ghprobe minimal off` 可完整还原（删键回落，默认 9 域名 + 兜底链恢复）。",
+      ].join("\n"));
+      return;
+    }
+    if (action === "off") {
+      if (!user || !isMinimal(user)) { console.log("主站模式本来就没开，无需还原。"); return; }
+      writeUserConfig(removeMinimal(user));
+      console.log(`主站模式已移除，domains/兜底链已删键回落（默认 9 域名，下一轮自动补齐）。\n配置文件：${p}`);
       return;
     }
     console.error("未知参数：只支持 on / off（无参数查看状态）。");

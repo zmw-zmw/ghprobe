@@ -14,10 +14,10 @@
 //   - off = **删除**预设写入的键：三方合并语义下「用户配置里没有的键」自动跟随最新默认，
 //     未来默认值的改进继续到达 —— 比把快照值抄回来钉死更好
 //   - 写回用 js-yaml dump，注释会丢（三方合并只看键值，无影响）；lowkey.enabled 是状态标记
-import fs from "node:fs";
-import path from "node:path";
-import yaml from "js-yaml";
-import { userConfigPath } from "./config.js";
+import { readUserConfig, writeUserConfig } from "./config.js";
+
+// 用户配置文件读写已收编进 config.js（预设类命令共用），这里转发导出保持兼容
+export { readUserConfig, writeUserConfig };
 
 // 无 SNI DoH 端点：实测证书带 IP SAN 的 5/7 条（111.7.73.60 / 39.156.84.71 证书不含 IP SAN，不入选）
 const LOWKEY_DOH = [
@@ -45,7 +45,8 @@ export const LOWKEY_PATHS = [
   "schedule.daemonHealthyMs", "proxy.idleProbeMin", "lowkey",
 ];
 
-function setPath(obj, path0, value) {
+// setPath/delPath 是预设键写入/删除的通用件，供其它预设命令（src/minimal.js）复用
+export function setPath(obj, path0, value) {
   const seg = path0.split(".");
   let cur = obj;
   for (let i = 0; i < seg.length - 1; i++) {
@@ -55,7 +56,7 @@ function setPath(obj, path0, value) {
   cur[seg[seg.length - 1]] = value;
 }
 
-function delPath(obj, path0) {
+export function delPath(obj, path0) {
   const seg = path0.split(".");
   let cur = obj;
   for (let i = 0; i < seg.length - 1; i++) {
@@ -102,15 +103,4 @@ export function removeLowkey(user) {
 
 export function isLowkey(user) {
   return Boolean(user && user.lowkey && user.lowkey.enabled);
-}
-
-export function readUserConfig() {
-  try { return yaml.load(fs.readFileSync(userConfigPath(), "utf8")); } catch { return null; }
-}
-
-export function writeUserConfig(obj) {
-  const p = userConfigPath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, yaml.dump(obj, { lineWidth: 120 }), "utf8");
-  return p;
 }

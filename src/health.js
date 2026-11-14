@@ -107,9 +107,15 @@ export function activeBlockToIdle(block) {
   return buildHealthBlock(p.entries, p.absent, p.extras, p.blocked, p.suspect, true);
 }
 
-// 合法域名全集 = 主域名 + 兜底域名；缺失检测与 orphan 清理都以它为准
+// 合法域名全集 = 主域名 + 兜底域名；缺失检测与 orphan 清理都以它为准。
+// 🔴 兜底域名只跟随**被跟踪的主域名**（0.1.13）：主域名不在 domains 里时，它的兜底
+//    是死重 —— minimal（只加速主站）模式下 raw 不被跟踪，jsdelivr 三条不该再进
+//    探测/orphan 名单。对默认配置无行为变化（默认主域名全在 domains 里）。
 export function targetDomains(cfg) {
-  const fb = Object.values(cfg.fallbacks || {}).flat();
+  const fb = [];
+  for (const primary of Object.keys(cfg.fallbacks || {})) {
+    if ((cfg.domains || []).includes(primary)) { fb.push(...cfg.fallbacks[primary]); }
+  }
   return [...new Set([...(cfg.domains || []), ...fb])];
 }
 
