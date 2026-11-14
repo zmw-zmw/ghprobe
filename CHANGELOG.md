@@ -15,6 +15,8 @@
 
 ### Changed
 
+- npm 页 -> GitHub 引流三件套:package.json 加 homepage(侧栏 Homepage 入口)、
+  README 顶部加 star 徽章、install 完成输出加一条仓库入口(每个装它的人都看到)。
 - README 快速开始区加用户反馈引导:好用的话来 issue 说一句使用环境
   (家宽/校园/公司网 + Windows 版本)—— 收集真实用户画像,自愿原则。
 - npm 关键词与描述扩充(中英双语:github-hosts / git-clone / githubusercontent /

@@ -72,8 +72,14 @@ function printHostsEntries() {
   try {
     const m = readFileSync(WIN_HOSTS, "utf8").match(/# === ghprobe begin ===[\s\S]*?# === ghprobe end ===/);
     if (!m) { return; }
-    for (const l of m[0].split(/\r?\n/).filter((x) => /^\d+\.\d+\.\d+\.\d+\s/.test(x))) { console.log(`  ${l}`); }
+    for (const l of m[0].split(/\r?\n/).filter((x) => /^\d+\.\d+\.\d+\s/.test(x))) { console.log(`  ${l}`); }
   } catch { /* 读不到就算了 */ }
+}
+
+// install 完成输出里的仓库入口：只在「刚装好、刚成功」的时机出现一次，
+// 不在任何其他命令里刷存在感 —— 星标是顺手的事，不是讨来的。
+function printStarTip() {
+  console.log("觉得有用？GitHub 点个 ⭐ 支持一下：https://github.com/zmw-zmw/ghprobe");
 }
 
 // 严格仅 Windows：hosts 路径硬编码 + Start-Process 提权 + ipconfig，非 Windows 直接给清晰报错
@@ -312,11 +318,12 @@ program.command("install")
     }
 
     console.log(`计划任务 ghprobe 已注册：每 ${minutes} 分钟健康检查（health --apply，runlevel=highest，无窗口）`);
-    if (opts.skipProbe) { console.log("未写 hosts（--skip-probe）；下一次定时到点会自动处理。"); return; }
-    if (merged == null) { console.log("hosts 未改动（现有条目仍然健康）。"); return; }
+    if (opts.skipProbe) { console.log("未写 hosts（--skip-probe）；下一次定时到点会自动处理。"); printStarTip(); return; }
+    if (merged == null) { console.log("hosts 未改动（现有条目仍然健康）。"); printStarTip(); return; }
     console.log("hosts 已写入 ✓");
     printHostsEntries();
     console.log("停止：ghprobe uninstall");
+    printStarTip();
   });
 
 program.command("off")

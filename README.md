@@ -2,6 +2,7 @@
 
 [![ci](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/zmw-zmw/ghprobe/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/ghprobe.svg)](https://www.npmjs.com/package/ghprobe)
+[![GitHub Stars](https://img.shields.io/github/stars/zmw-zmw/ghprobe?style=social)](https://github.com/zmw-zmw/ghprobe/stargazers)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](package.json)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d6.svg)](README.md#系统要求与常见问题)
