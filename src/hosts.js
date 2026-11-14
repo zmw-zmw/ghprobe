@@ -347,21 +347,27 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $src = '${hostsPath}'
 $tmp = '${tmpPath}'
 $bak = '${bak}'
+$tmp2 = '${hostsPath}.ghprobe-apply-tmp'
 $marker = '${BEGIN}'
 $enc = [Text.Encoding]::Default
 try {
   Copy-Item -Force $src $bak
-  Copy-Item -Force $tmp $src
+  # 🔴 原子替换(2026-11-14 本机事故):Copy-Item 是流式复制,与其它 hosts 写入方并发时
+  #    会在文件里留下 NUL 空洞 —— Windows 解析器读到 NUL 直接丢弃整个 hosts,全部条目
+  #    失效(本机实测:文件前 1533 字节被填零,用户打不开 GitHub)。同卷 Move-Item =
+  #    原子重命名,竞争窗口为零。
+  Move-Item -Force $tmp $src
   $now = [IO.File]::ReadAllText($src, $enc)
   if ($now -notmatch [regex]::Escape($marker)) {
-    Copy-Item -Force $bak $src
+    Copy-Item -Force $bak $tmp2
+    Move-Item -Force $tmp2 $src
     [Console]::Error.WriteLine('hosts 校验失败：未找到 ghprobe 标记，已回滚')
     exit 1
   }
   ipconfig /flushdns | Out-Null
   exit 0
 } catch {
-  if (Test-Path $bak) { Copy-Item -Force $bak $src }
+  if (Test-Path $bak) { Copy-Item -Force $bak $tmp2; Move-Item -Force $tmp2 $src }
   [Console]::Error.WriteLine('hosts 写入失败: ' + $_.Exception.Message)
   exit 1
 }
@@ -389,7 +395,9 @@ try {
     if (-not $skip) { $keep += $line }
   }
   $clean = ($keep -join [Environment]::NewLine).TrimEnd() + [Environment]::NewLine
-  [IO.File]::WriteAllText($src, $clean, $enc)
+  $tmp2 = '${hostsPath}.ghprobe-restore-tmp'
+  [IO.File]::WriteAllText($tmp2, $clean, $enc)
+  Move-Item -Force $tmp2 $src
   ipconfig /flushdns | Out-Null
   exit 0
 } catch {
