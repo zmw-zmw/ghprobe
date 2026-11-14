@@ -8,6 +8,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { loadConfig, ensureUserConfig, userConfigPath, userConfigSnapshotPath, configDiff } from "../src/config.js";
+import { lowkeyPreset, applyLowkey, removeLowkey, isLowkey, readUserConfig, writeUserConfig } from "../src/lowkey.js";
 import { updatePool, poolNeedsUpdate, poolCachePath } from "../src/pool.js";
 import { hasLocalNetwork } from "../src/net.js";
 import { probeNow, startServer } from "../src/server.js";
@@ -443,6 +444,47 @@ program.command("config-diff")
     }
     console.log("\n想让某处跟随新默认：把用户配置里对应的键**删掉**即可（没被改过的键会自动跟随默认）。");
     console.log(`配置文件：${userConfigPath()}`);
+  });
+
+program.command("lowkey")
+  .description("低调模式：一键写入/移除反运营商画像缓解配置（无 SNI DoH / 降扇出 / 拉间隔，手册见 docs/guide-isp.md）")
+  .argument("[action]", "on | off（无参数 = 查看当前状态）")
+  .action(async (action) => {
+    await maybeNotifyUpdate();
+    const user = readUserConfig();
+    const p = userConfigPath();
+    if (!action) {
+      if (!user) { console.log(`还没有用户配置 —— 先跑 \`ghprobe install\`。\n配置文件：${p}`); return; }
+      console.log(isLowkey(user)
+        ? `低调模式：已开启（写入于 ${user.lowkey.at}）\n开启后你的探测对外表现为：无 SNI DoH×5 / 候选 4 / 池 12 / 并发 4 / 健康态 120s / 保活 10min。`
+        : "低调模式：未开启。`ghprobe lowkey on` 一键写入（`ghprobe lowkey off` 可完整还原）。");
+      console.log(`配置文件：${p}`);
+      return;
+    }
+    if (action === "on") {
+      if (!user) { console.error(`还没有用户配置 —— 先跑一次 \`ghprobe install\` 生成。\n配置文件：${p}`); process.exitCode = 1; return; }
+      if (isLowkey(user)) { console.log("低调模式已开启，无需重复写入（off 可还原）。"); return; }
+      writeUserConfig(applyLowkey(user));
+      console.log([
+        "低调模式已写入用户配置：",
+        "  - DoH 只留 5 条无 SNI 端点（证书按 IP SAN 校验，SNI 阻断免疫）",
+        "  - UDP 补充源收敛为 114 + 119.29.29.29",
+        "  - 候选 8->4、池 32->12、并发 10->4（对外握手扇出降到 1/3 以下）",
+        "  - 健康态间隔 90s->120s、保活探测 5min->10min",
+        "daemon 每轮重载配置，改完即生效，不用重启。",
+        "`ghprobe lowkey off` 可完整还原（删键回落，默认值的改进继续到达）。",
+        "原理与更多手动项见 docs/guide-isp.md。",
+      ].join("\n"));
+      return;
+    }
+    if (action === "off") {
+      if (!user || !isLowkey(user)) { console.log("低调模式本来就没开，无需还原。"); return; }
+      writeUserConfig(removeLowkey(user));
+      console.log(`低调模式已移除，预设写入的键已全部删除（自动回落跟随默认值）。\n配置文件：${p}`);
+      return;
+    }
+    console.error("未知参数：只支持 on / off（无参数查看状态）。");
+    process.exitCode = 1;
   });
 
 program.command("report")

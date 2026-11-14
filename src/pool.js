@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import https from "node:https";
 import { userDataDir } from "./hosts.js";
+import { NEUTRAL_UA } from "./prober.js";
 
 export function poolCachePath() {
   return path.join(userDataDir(), "pool.cache.json");
@@ -67,7 +68,7 @@ function fetchMeta(ip, host, pathName, timeoutMs, onReq) {
       port: 443,
       servername: host,
       path: pathName,
-      headers: { Host: host, "User-Agent": "ghprobe", Accept: "application/json" },
+      headers: { Host: host, "User-Agent": NEUTRAL_UA, Accept: "application/json" },
       rejectUnauthorized: true,
       timeout: timeoutMs,
     }, (res) => {

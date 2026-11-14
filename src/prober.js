@@ -293,13 +293,19 @@ export function sigFor(domain, cfg) {
 }
 
 // 第三关：HTTP GET（host=IP、SNI=域名、Host头=域名），读少量响应体做终审
+// UA 中性化（0.1.13 反运营商）：探测请求不再自报家门 —— 旧值 "ghprobe/0.1.0" 在 TLS 内明文可见，
+// 运营商 DPI 抓到它 = 现成的画像字段（「该用户在跑 ghprobe 工具高频连 GitHub」）。
+// 默认伪装成普通 Chrome 桌面流量；可配 probe.userAgent 覆盖。静态值有意不追新：
+// 稳定的 UA 比频繁变版本号的 UA 更不显眼，且探的是 GitHub 主站，Chrome UA 完全正常。
+export const NEUTRAL_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
 function httpProbe(ip, domain, httpMs, cfg, port = 443) {
   return new Promise((resolve) => {
     const sig = sigFor(domain, cfg);
     const t0 = Date.now();
     const req = https.request({
       host: ip, port, servername: domain, method: "GET", path: sig.path, timeout: httpMs,
-      headers: { Host: domain, "user-agent": "ghprobe/0.1.0", accept: "*/*" },
+      headers: { Host: domain, "user-agent": cfg?.probe?.userAgent || NEUTRAL_UA, accept: "*/*" },
     }, async (res) => {
       const ttfb = Date.now() - t0;
       const body = await readPrefix(res, 4096);

@@ -60,14 +60,24 @@ export function daemonRunning(hb, now = Date.now()) {
 }
 
 // 自适应间隔（纯函数）：
-//   断网          -> 120s（断网时探测无意义，省唤醒；恢复由下一轮本地检查发现）
-//   有异常/有变更  -> 15s（刚经历故障，密集盯防确认稳定）
-//   全部健康      -> 45s（空闲基线；比 1 分钟任务更密，且没有进程启动开销）
-export function nextIntervalMs(result, intervals = {}) {
-  const { healthy = 45_000, fast = 15_000, offline = 120_000 } = intervals;
+//   断网                -> 120s（断网时探测无意义，省唤醒；恢复由下一轮本地检查发现）
+//   全灭（stuck 非空）  -> 指数退避（0.1.13 反运营商）：15s -> 30s -> 60s -> ... 上限 stuckBackoffMaxMs
+//   有异常/有变更       -> 15s（刚经历故障，密集盯防确认稳定）
+//   全部健康            -> 45s（空闲基线；比 1 分钟任务更密，且没有进程启动开销）
+// 为什么全灭要退避：候选全灭 = 池子过期或链路整体不可达，15s 密集盯防只会高频打境外连接
+// （被运营商按「境外连接频率」画像的用户等于持续自我举报），正常用户也纯浪费 ——
+// 怎么探都全灭的时候，唯一有用的动作是等池子刷（poolUpdate 到点自动跑）或等链路自愈。
+// streak = 连续全灭轮数（runDaemon 维护，成功一轮即清零）：第 n 轮连续全灭退 fast * 2^(n-1)，
+// 首轮全灭仍 15s —— 单轮全灭可能是抖动，密集确认一次；连续全灭才指数拉开。
+export function nextIntervalMs(result, intervals = {}, stuckStreak = 0) {
+  const { healthy = 45_000, fast = 15_000, offline = 120_000, stuckBackoffMaxMs = 1_800_000 } = intervals;
   if (!result || result.offline) { return offline; }
-  const troubled = result.action !== "none" || (Array.isArray(result.stuck) && result.stuck.length > 0);
-  return troubled ? fast : healthy;
+  const stuck = Array.isArray(result.stuck) ? result.stuck.length : 0;
+  if (result.action !== "none" || stuck > 0) {
+    if (stuck > 0 && stuckStreak > 1) { return Math.min(fast * 2 ** (stuckStreak - 1), stuckBackoffMaxMs); }
+    return fast;
+  }
+  return healthy;
 }
 
 // 单轮自愈：暂停跳过 -> 代理状态监测（存活->死亡跃迁即全量重测）-> 断网跳过
@@ -293,6 +303,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
   writeHeartbeat();
   log(`daemon 已启动 (pid ${process.pid})`);
   let cycles = 0;
+  let stuckStreak = 0; // 连续全灭轮数（0.1.13 全灭退避用），成功一轮清零
   for (;;) {
     let result = null;
     let cfgNow = cfg;
@@ -300,6 +311,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       cfgNow = loadConfig(); // 每轮重载：配置编辑与池缓存更新即时生效
       result = await cycle(cfgNow, log);
       if (result && result.action) { log(`daemon cycle action=${result.action} reason=${result.reason || ""}`); }
+      stuckStreak = result && Array.isArray(result.stuck) && result.stuck.length > 0 ? stuckStreak + 1 : 0;
     } catch (e) {
       log(`daemon 循环异常（不退出，继续下一轮）: ${e.message}`);
       result = { action: "error" }; // 异常按「有事」处理 -> fast 档，别在故障后睡满 2 分钟
@@ -318,9 +330,10 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       healthy: cfgNow.schedule?.daemonHealthyMs ?? 45_000,
       fast: cfgNow.schedule?.daemonFastMs ?? 15_000,
       offline: cfgNow.schedule?.daemonOfflineMs ?? 120_000,
+      stuckBackoffMaxMs: cfgNow.schedule?.stuckBackoffMaxMs ?? 1_800_000,
     };
     const jitter = deps.jitter ?? cfgNow.schedule?.jitter ?? 0.15;
-    const base = nextIntervalMs(result, intervals);
+    const base = nextIntervalMs(result, intervals, stuckStreak);
     const wait = jitter > 0 ? base * (1 - jitter + Math.random() * 2 * jitter) : base;
     await sleep(wait);
   }
