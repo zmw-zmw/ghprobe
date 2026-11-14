@@ -15,6 +15,8 @@
 
 ### Changed
 
+- README 快速开始区加用户反馈引导:好用的话来 issue 说一句使用环境
+  (家宽/校园/公司网 + Windows 版本)—— 收集真实用户画像,自愿原则。
 - npm 关键词与描述扩充(中英双语:github-hosts / git-clone / githubusercontent /
   github加速 / 直连 等),仅元数据便于搜索,无运行时行为变化。
 - status:保活待命模式下不再把注释域名列为「未写入」。

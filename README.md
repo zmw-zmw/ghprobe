@@ -28,6 +28,8 @@ ghprobe uninstall   # 停止：删除计划任务并还原 hosts
 
 装完即用，之后不用再敲命令。完整命令与配置说明见第 5 节「如何使用」。
 
+> 💬 好用的话，欢迎来 [Issues](https://github.com/zmw-zmw/ghprobe/issues) 说一句你的使用环境（家宽 / 校园网 / 公司网 + Windows 版本）—— 你的网络环境能帮 ghprobe 变得更稳，也是作者知道「这东西真的有人在用」的唯一方式。
+
 ---
 
 ## 1. 项目介绍
