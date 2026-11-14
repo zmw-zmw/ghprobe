@@ -106,9 +106,11 @@ test("lightProbe: false 退回旧行为(主备都探)", async () => {
   assert.deepEqual(calls.sort(), ["github.com|1.1.1.1", "github.com|3.3.3.3"], "关闭轻探活 = 主备都探");
 });
 
-test("抖动: sleep 落在 [0.85x, 1.15x] 区间内(默认 ±15%)", async () => {
+test("抖动: sleep 落在 [0.85x, 1.15x] 区间内(uniform 模式 ±15%)", async () => {
   const sleeps = [];
-  await runDaemon({ schedule: { daemonHealthyMs: 90_000 } }, () => {}, {
+  // 🔴 runDaemon 每轮 loadConfig(),注入的 cfg 不决定间隔 —— 模式/幅度必须走 deps
+  await runDaemon({}, () => {}, {
+    jitterMode: "uniform",
     maxCycles: 8,
     cycle: async () => ({ action: "none" }),
     sleep: async (ms) => { sleeps.push(ms); },

@@ -33,7 +33,7 @@ export function lowkeyPreset() {
   return {
     doh: LOWKEY_DOH.map((e) => ({ ...e })),
     dohUdp: { enabled: true, servers: ["114.114.114.114", "119.29.29.29"], timeoutMs: 2000 },
-    probe: { maxCandidates: 4, maxPoolIps: 12, concurrency: 4 },
+    probe: { maxCandidates: 4, maxPoolIps: 12, concurrency: 4, dohMaxPerRound: 2 },
     schedule: { daemonHealthyMs: 120_000 },
     proxy: { idleProbeMin: 10 },
   };
@@ -41,7 +41,7 @@ export function lowkeyPreset() {
 
 // 预设会写哪些键（off 时按此删）：不带点 = 顶层整键；带点 = 只删该子键（用户自有覆盖保留）
 export const LOWKEY_PATHS = [
-  "doh", "dohUdp", "probe.maxCandidates", "probe.maxPoolIps", "probe.concurrency",
+  "doh", "dohUdp", "probe.maxCandidates", "probe.maxPoolIps", "probe.concurrency", "probe.dohMaxPerRound",
   "schedule.daemonHealthyMs", "proxy.idleProbeMin", "lowkey",
 ];
 

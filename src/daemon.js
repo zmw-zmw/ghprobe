@@ -59,6 +59,19 @@ export function daemonRunning(hb, now = Date.now()) {
   return heartbeatFresh(hb, now) && processAlive(hb.pid) && hb.pid !== process.pid;
 }
 
+// 间隔采样器（0.1.14 反运营商「乱掉」）：把探测节奏从「周期 ±15%」升级成**泊松过程**。
+// 指数分布的无记忆性意味着：任意时刻观察「下一轮还有多久」与历史完全无关 —— 周期性检测
+// （傅里叶/自相关/等间隔聚类）从数学上提不出任何周期特征，运营商画像算法拿到的时序
+// 就是「偶发短爆发 + 随行长静默」，与真实人类使用行为同分布。uniform 保留旧 ±jitter 行为；
+// jitter:0 或 fixed 恒为精确间隔（测试/强迫症逃生门）。钳位 [0.25×base, 3×base]：
+// 下限防退化成高频连打，上限防深退避时无限静默（代价：全灭深退避时链路恢复检测最多延迟 3×base）。
+export function sampleInterval(base, mode = "poisson", jitter = 0.15) {
+  if (mode === "fixed" || jitter === 0) { return base; }
+  if (mode === "uniform") { return base * (1 - jitter + Math.random() * 2 * jitter); }
+  const w = -Math.log(1 - Math.random()) * base; // 指数分布：-ln(U) * 均值
+  return Math.min(Math.max(w, base * 0.25), base * 3);
+}
+
 // 自适应间隔（纯函数）：
 //   断网                -> 120s（断网时探测无意义，省唤醒；恢复由下一轮本地检查发现）
 //   全灭（stuck 非空）  -> 指数退避（0.1.13 反运营商）：15s -> 30s -> 60s -> ... 上限 stuckBackoffMaxMs
@@ -324,8 +337,8 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       return { started: true, cycles, yielded: true }; // 让位给更年轻的实例
     }
     // 间隔每轮从最新配置取：改 schedule.* 热生效，不用重启 daemon。
-    // 抖动（schedule.jitter，默认 ±15%）：打破精确周期的机器特征 —— 反制裁视角下，
-    // 「每 90.000s 准时握手」和「每 90s±13s 自然波动」在运营商画像里是两种用户。
+    // 泊松节奏（schedule.jitterMode，默认 poisson）：指数分布无记忆 —— 反制裁视角下
+    // 「每 90.000s 准时握手」和「无记忆的随机到达」在运营商画像算法里是两种物种。
     const intervals = deps.intervals || {
       healthy: cfgNow.schedule?.daemonHealthyMs ?? 45_000,
       fast: cfgNow.schedule?.daemonFastMs ?? 15_000,
@@ -333,8 +346,8 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       stuckBackoffMaxMs: cfgNow.schedule?.stuckBackoffMaxMs ?? 1_800_000,
     };
     const jitter = deps.jitter ?? cfgNow.schedule?.jitter ?? 0.15;
+    const jitterMode = deps.jitterMode ?? cfgNow.schedule?.jitterMode ?? "poisson";
     const base = nextIntervalMs(result, intervals, stuckStreak);
-    const wait = jitter > 0 ? base * (1 - jitter + Math.random() * 2 * jitter) : base;
-    await sleep(wait);
+    await sleep(sampleInterval(base, jitterMode, jitter));
   }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 zmw
 // 一轮完整探测：DoH 候选 + 内置池 -> 三关并发探测 -> 排名 -> 兜底轮
-import { resolveAll, resolveAllUdp } from "./doh.js";
+import { resolveAll, resolveAllUdp, shuffle } from "./doh.js";
 import { probeIp, pool } from "./prober.js";
 import { rank, neededFallbacks, mergeSamples } from "./ranker.js";
 
@@ -23,14 +23,14 @@ export function poolsForDomain(cfg, domain) {
 async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "" } = {}) {
   return Promise.all(domains.map(async (domain) => {
     say(prefix ? `${prefix}探测 ${domain}` : `解析 ${domain}`);
-    const { ips } = await resolveAll(cfg.doh, domain, cfg.timeouts.dohMs);
+    const { ips } = await resolveAll(cfg.doh, domain, cfg.timeouts.dohMs, cfg.probe?.dohMaxPerRound ?? 0);
     // 0.1.9 UDP 传统 DNS 补充源：114/119.29.29.29 等只有 UDP 53（443 无 DoH，实测），
     // 答案可能被污染，但三关探测的 TLS 证书终审会把污染 IP 淘汰 —— UDP 只负责拉宽候选面。
     // 排在 DoH 之后合并再限额：DoH 答案优先，UDP 填补剩余名额。
     let udpIps = [];
     if (cfg.dohUdp?.enabled !== false && Array.isArray(cfg.dohUdp?.servers) && cfg.dohUdp.servers.length) {
       try {
-        const u = await resolveAllUdp(cfg.dohUdp.servers, domain, cfg.dohUdp.timeoutMs ?? 2000);
+        const u = await resolveAllUdp(cfg.dohUdp.servers, domain, cfg.dohUdp.timeoutMs ?? 2000, cfg.probe?.dohMaxPerRound ?? 0);
         udpIps = u.ips;
       } catch { /* UDP 源失败不致命：DoH + 内置池照常 */ }
     }
@@ -41,7 +41,9 @@ async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "
     // stuck=github.com」。分开限额后内置池一定拿得到名额。
     const fromDoh = [...new Set([...(ips || []), ...udpIps])].slice(0, cfg.probe.maxCandidates);
     const fromPool = usePool ? poolsForDomain(cfg, domain).slice(0, cfg.probe.maxPoolIps ?? 12) : [];
-    const candidates = [...new Set([...fromDoh, ...fromPool])];
+    // 候选顺序每轮洗牌（0.1.14 反运营商）：探测是按候选序并发跑的，固定顺序 = 对外连接
+    // 序列确定。洗牌只影响「先连哪个」，排名按分数算，结果语义不变。
+    const candidates = shuffle([...new Set([...fromDoh, ...fromPool])]);
     say(`  候选 ${candidates.length} 个（DoH ${ips?.length ?? 0} + UDP ${udpIps.length} + 池 ${fromPool.length}）: ${candidates.join(", ")}`);
     return { domain, candidates };
   }));

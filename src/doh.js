@@ -83,9 +83,27 @@ export function queryDoh(ep, name, timeoutMs) {
   });
 }
 
-// 联邦查询：全部端点并发，成功者取并集去重
-export async function resolveAll(endpoints, name, timeoutMs) {
-  const rs = await Promise.all(endpoints.map((ep) => queryDoh(ep, name, timeoutMs)));
+// Fisher-Yates 洗牌（返回新数组）。反运营商「乱掉」（0.1.14）：固定顺序的连接序列
+// 在运营商流量模型里是确定性特征 —— 端点顺序、候选顺序每轮随机，连接面既不确定也不重复。
+export function shuffle(list) {
+  const a = [...(list || [])];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// 端点抽样：洗牌后取前 keep 个（keep<=0 = 全部，只洗顺序）。纯函数可单测。
+export function pickEndpoints(list, keep = 0) {
+  const a = shuffle(list);
+  return keep > 0 && keep < a.length ? a.slice(0, keep) : a;
+}
+
+// 联邦查询：全部端点并发（顺序每轮洗牌；keep>0 时随机抽子集 —— 每轮不同的端点组合），
+// 成功者取并集去重
+export async function resolveAll(endpoints, name, timeoutMs, keep = 0) {
+  const rs = await Promise.all(pickEndpoints(endpoints, keep).map((ep) => queryDoh(ep, name, timeoutMs)));
   const ips = new Set();
   for (const r of rs) { for (const ip of r.ips) { ips.add(ip); } }
   return { ips: [...ips], sources: rs };
@@ -125,8 +143,9 @@ export function queryUdp(server, name, timeoutMs, port = 53) {
 
 // UDP 联邦查询：全部服务器并发，成功者取并集去重（与 resolveAll 同构）。
 // 服务器条目支持 "ip" 或 "ip:port"（port 缺省 53）。
-export async function resolveAllUdp(servers, name, timeoutMs) {
-  const targets = (servers || []).map((s) => {
+export async function resolveAllUdp(servers, name, timeoutMs, keep = 0) {
+  const list = pickEndpoints(servers || [], keep);
+  const targets = list.map((s) => {
     const str = String(s);
     const i = str.lastIndexOf(":");
     return /^\d+\.\d+\.\d+\.\d+:\d+$/.test(str) ? { host: str.slice(0, i), port: parseInt(str.slice(i + 1), 10) } : { host: str, port: 53 };
