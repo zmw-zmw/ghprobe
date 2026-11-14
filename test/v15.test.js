@@ -14,12 +14,12 @@ test("sampleInterval: poisson 样本落在钳位区间,均值近似 base(大样�
   const base = 90_000;
   const samples = Array.from({ length: 1000 }, () => sampleInterval(base, "poisson"));
   for (const w of samples) {
-    assert.ok(w >= base * 0.25 - 1 && w <= base * 3 + 1, `钳位区间外: ${w}`);
+    assert.ok(w >= base * 0.25 - 1 && w <= base * 2 + 1, `钳位区间外: ${w}`);
   }
   const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
-  // 钳位把分布截断,均值略低于理论 mean(截断上尾),给 12% 容差
-  assert.ok(Math.abs(mean - base) < base * 0.12, `均值应近似 base: ${mean}`);
-  // 连续分布几乎无重复值 —— 但钳位两端会各撞出一个常数档(0.25x/3x),占比 ~27%
+  // 上钳位 2x 截掉 13.5% 上尾 -> 均值系统性略低于 base(~0.89x),容差给到覆盖
+  assert.ok(mean > base * 0.75 && mean < base * 1.05, `均值应近似 base: ${mean}`);
+  // 连续分布几乎无重复值 —— 但钳位两端会各撞出一个常数档(0.25x/2x)
   assert.ok(new Set(samples).size > 250, `应充分随机: ${new Set(samples).size} 个不同值`);
 });
 
@@ -41,7 +41,7 @@ test("runDaemon: 默认 poisson——等待无固定周期且不被钳位区间�
   });
   assert.equal(sleeps.length, 30);
   for (const w of sleeps) {
-    assert.ok(w >= 90_000 * 0.25 - 1 && w <= 90_000 * 3 + 1, `泊松钳位区间外: ${w}`);
+    assert.ok(w >= 90_000 * 0.25 - 1 && w <= 90_000 * 2 + 1, `泊松钳位区间外: ${w}`);
   }
   const mean = sleeps.reduce((a, b) => a + b, 0) / sleeps.length;
   assert.ok(mean > 90_000 * 0.4 && mean < 90_000 * 2, `30 样本均值应靠近 base: ${mean}`);

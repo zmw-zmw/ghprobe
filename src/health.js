@@ -188,6 +188,17 @@ export function decide(probeResults, current, cfg, vantage = null) {
     // 主条目失败但有备选活着 -> 提升备选（不重排）
     const main = rs.find((r) => r.role !== "alt");
     if (main && !main.ok) { promote.set(d, alive[0].ip); }
+    // 主条目活着但显著变慢（0.1.13 主慢换位）：轻探活原本只看「死活」，但抖动窗口里
+    // 「活着但慢」对用户的体感几乎等于断 —— 这里补上「快慢」这一维：主条目 ttfb 超过
+    // slowSwapTtfbMs（默认 800ms）且备选 ttfb < 主条目 60%，换位（复用 promote 通道）。
+    // 60% 阈值 = 备选必须显著更快才换，避免两个 IP 抖来抖去反复横跳；0 = 关闭。
+    else if (main && main.ok && main.ttfb > 0) {
+      const slowTtfbMs = cfg.schedule?.slowSwapTtfbMs ?? 800;
+      if (slowTtfbMs > 0 && main.ttfb >= slowTtfbMs) {
+        const faster = alive.find((r) => r !== main && r.ttfb > 0 && r.ttfb < main.ttfb * 0.6);
+        if (faster) { promote.set(d, faster.ip); }
+      }
+    }
   }
   const total = current.entries.size;
 
@@ -411,8 +422,14 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
   let probeResults = probed.map((r, i) => ({ ...r, role: pairs[i][2] }));
   if (light) {
     const deadMains = new Set(probeResults.filter((r) => r.role === "main" && !r.ok).map((r) => r.domain));
+    // 主慢换位（0.1.13）：主条目活着但 ttfb 超阈值时也补测备选 —— 备选显著更快就换位
+    const slowTtfbMs = cfg.schedule?.slowSwapTtfbMs ?? 800;
+    const slowMains = slowTtfbMs > 0
+      ? new Set(probeResults.filter((r) => r.role === "main" && r.ok && (r.ttfb || 0) >= slowTtfbMs).map((r) => r.domain))
+      : new Set();
+    const altTrigger = new Set([...deadMains, ...slowMains]);
     const altPairs = [];
-    for (const d of deadMains) {
+    for (const d of altTrigger) {
       for (const alt of current.extras.get(d) || []) { altPairs.push([d, alt, "alt"]); }
     }
     if (altPairs.length) {

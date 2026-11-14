@@ -63,13 +63,14 @@ export function daemonRunning(hb, now = Date.now()) {
 // 指数分布的无记忆性意味着：任意时刻观察「下一轮还有多久」与历史完全无关 —— 周期性检测
 // （傅里叶/自相关/等间隔聚类）从数学上提不出任何周期特征，运营商画像算法拿到的时序
 // 就是「偶发短爆发 + 随行长静默」，与真实人类使用行为同分布。uniform 保留旧 ±jitter 行为；
-// jitter:0 或 fixed 恒为精确间隔（测试/强迫症逃生门）。钳位 [0.25×base, 3×base]：
-// 下限防退化成高频连打，上限防深退避时无限静默（代价：全灭深退避时链路恢复检测最多延迟 3×base）。
+// jitter:0 或 fixed 恒为精确间隔（测试/强迫症逃生门）。钳位 [0.25×base, 2×base]：
+// 下限防退化成高频连打；上限原为 3×（本机实测拖慢故障检测——用户卡住时最长等 3×120s）
+// 收紧到 2×，代价是 ~13.5% 样本撞上限（分布略呈台阶，反画像能力基本无损）。
 export function sampleInterval(base, mode = "poisson", jitter = 0.15) {
   if (mode === "fixed" || jitter === 0) { return base; }
   if (mode === "uniform") { return base * (1 - jitter + Math.random() * 2 * jitter); }
   const w = -Math.log(1 - Math.random()) * base; // 指数分布：-ln(U) * 均值
-  return Math.min(Math.max(w, base * 0.25), base * 3);
+  return Math.min(Math.max(w, base * 0.25), base * 2);
 }
 
 // 自适应间隔（纯函数）：
