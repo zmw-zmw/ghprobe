@@ -122,7 +122,7 @@ program.command("doctor")
   });
 
 program.command("daemon")
-  .description("常驻自愈循环（由监督者自动拉起，一般不需要手动跑）：15~45s 自适应健康检查")
+  .description("常驻自愈循环（由监督者自动拉起，一般不需要手动跑）：健康态 ~90s 轻探活 / 异常 15s 盯防（可配 schedule.daemon*Ms）")
   .option("-c, --config <path>", "用户配置覆盖")
   .action(async (opts) => {
     const cfg = loadConfig(opts.config);
@@ -262,7 +262,7 @@ program.command("install")
     // 生成用户可编辑的配置文件（已存在则不覆盖，保留用户改动）
     const ucfg = ensureUserConfig();
     const cfg = loadConfig(opts.config);
-    const minutes = cfg.schedule?.healthMin ?? 1;
+    const minutes = cfg.schedule?.healthMin ?? 5;
     console.log(`用户配置：${ucfg}`);
     console.log("（可直接编辑：候选池 / 超时 / 调度间隔都在里面，优先级高于包内默认）");
     // 断网时不探测（必然全灭），但**仍然注册计划任务** —— 有网后任务会自动跑起来
@@ -317,7 +317,7 @@ program.command("install")
       try { fs.unlinkSync(tmp); } catch { /* 清理失败不管 */ }
     }
 
-    console.log(`计划任务 ghprobe 已注册：每 ${minutes} 分钟健康检查（health --apply，runlevel=highest，无窗口）`);
+    console.log(`监督任务 ghprobe 已注册：每 ${minutes} 分钟查心跳拉 daemon（daemon 干活，平时零探测）`);
     if (opts.skipProbe) { console.log("未写 hosts（--skip-probe）；下一次定时到点会自动处理。"); printStarTip(); return; }
     if (merged == null) { console.log("hosts 未改动（现有条目仍然健康）。"); printStarTip(); return; }
     console.log("hosts 已写入 ✓");

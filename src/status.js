@@ -79,7 +79,8 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
   if (daemon === undefined) { daemon = readHeartbeat(); }
   if (daemon && heartbeatFresh(daemon) && processAlive(daemon.pid)) {
     const age = Math.round((Date.now() - new Date(daemon.at).getTime()) / 1000);
-    lines.push(`常驻守护：运行中（pid ${daemon.pid}，心跳 ${age}s 前，15~45s 自适应自愈）`);
+    const healthy = Math.round((cfg.schedule?.daemonHealthyMs ?? 90_000) / 1000);
+    lines.push(`常驻守护：运行中（pid ${daemon.pid}，心跳 ${age}s 前，健康态 ${healthy}s 轻探活 / 异常 15s 盯防）`);
   } else if (daemon) {
     lines.push("常驻守护：未运行（心跳陈旧）—— 监督者会在下一分钟自动拉起");
   } else {
@@ -88,7 +89,7 @@ export function buildStatusReport({ hostsContent = "", cfg, logTail = [], task =
   if (task === null || task === undefined) {
     lines.push("计划任务：查询跳过（仅 Windows）");
   } else if (task.output && /ghprobe/i.test(task.output)) {
-    lines.push("计划任务：已注册，每分钟自愈中");
+    lines.push(`计划任务：已注册（每 ${cfg.schedule?.healthMin ?? 5} 分钟监督，daemon 干活）`);
   } else {
     lines.push(`计划任务：${task.error ? `查询失败 ${task.error}` : "未注册 —— 跑 ghprobe install"}`);
   }

@@ -39,7 +39,7 @@ test("buildStatusReport：列出主备条目、缺失/冷却标记与生成时�
   assert.ok(lines.includes("[缺失] cdn.jsdelivr.net"));
   assert.ok(lines.includes("[阻断] raw.githubusercontent.com"));
   assert.ok(lines.includes("2026-10-31T00:00:00.000Z"));
-  assert.ok(lines.includes("每分钟自愈中"));
+  assert.ok(lines.includes("每 5 分钟监督"));
   assert.ok(lines.includes("全部健康"));
 });
 

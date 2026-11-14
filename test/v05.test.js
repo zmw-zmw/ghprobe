@@ -55,7 +55,7 @@ test("runDaemon：maxCycles + 心跳逐轮刷新 + 间隔序列（健康/异常/
     },
   });
   assert.deepEqual(r, { started: true, cycles: 3 });
-  assert.deepEqual(sleeps, [45_000, 15_000]); // 健康轮 -> 45s；异常轮 -> 15s；末轮不再睡
+  assert.deepEqual(sleeps, [90_000, 15_000]); // 健康轮 -> 90s（0.1.11 起）；异常轮 -> 15s；末轮不再睡
   // 心跳文件真实落盘（helpers 已把 LOCALAPPDATA 指到临时目录）
   const hb = readHeartbeat();
   assert.ok(hb && hb.pid === process.pid && heartbeatFresh(hb));

@@ -225,7 +225,7 @@ test("loadConfig: 用户配置里没改过的键跟随新默认（端到端）",
     // 快照 = 默认（模拟 install），用户配置 = 默认 + 一处自定义
     ensureUserConfig();
     const p = userConfigPath();
-    const user = fs.readFileSync(p, "utf8").replace(/healthMin: 1/, "healthMin: 9");
+    const user = fs.readFileSync(p, "utf8").replace(/healthMin: \d+/, "healthMin: 9");
     fs.writeFileSync(p, user, "utf8");
 
     const cfg = loadConfig();

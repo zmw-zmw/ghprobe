@@ -287,7 +287,6 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
     proxyState, detectProxy: deps.detectProxy, runProbe: deps.runProbe, readHosts: deps.readHosts,
   }));
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const intervals = deps.intervals || {};
   const maxCycles = deps.maxCycles ?? Infinity;
   const hb = readHeartbeat();
   if (daemonRunning(hb)) { return { started: false, reason: "已有 daemon 在跑（心跳新鲜）" }; }
@@ -312,6 +311,12 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
     if (newer && newer.pid !== process.pid && heartbeatFresh(newer) && processAlive(newer.pid)) {
       return { started: true, cycles, yielded: true }; // 让位给更年轻的实例
     }
+    // 间隔每轮从最新配置取：改 schedule.* 热生效，不用重启 daemon
+    const intervals = deps.intervals || {
+      healthy: cfgNow.schedule?.daemonHealthyMs ?? 45_000,
+      fast: cfgNow.schedule?.daemonFastMs ?? 15_000,
+      offline: cfgNow.schedule?.daemonOfflineMs ?? 120_000,
+    };
     await sleep(nextIntervalMs(result, intervals));
   }
 }

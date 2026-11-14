@@ -58,7 +58,7 @@ export function evaluateHosts(content, cfg, probed = true) {
   if (n === 0) {
     return { state: current, checks: [check("hosts", "hosts 写入状态", probed ? "fail" : "info",
       "hosts 里还没有 ghprobe 块",
-      probed ? "运行 `ghprobe install`：写入 hosts 并注册每分钟自愈的计划任务（一次 UAC）" : "")] };
+      probed ? "运行 `ghprobe install`：写入 hosts 并注册监督任务（一次 UAC）" : "")] };
   }
   const targets = targetDomains(cfg);
   const absent = [...current.absent.keys()];
@@ -81,16 +81,16 @@ export function evaluateHosts(content, cfg, probed = true) {
 // 查询本身失败不等于没注册，单独标 warn 而不是 fail，避免把「权限/语法问题」夸大成「自愈失效」。
 export function evaluateTask(queryResult) {
   if (queryResult === null || queryResult === undefined) {
-    return check("task", "计划任务（每分钟自愈）", "info", "跳过（仅 Windows 支持查询）");
+    return check("task", "计划任务（监督+自愈）", "info", "跳过（仅 Windows 支持查询）");
   }
   if (queryResult.output && /ghprobe/i.test(queryResult.output)) {
-    return check("task", "计划任务（每分钟自愈）", "ok", "已注册（ghprobe）");
+    return check("task", "计划任务（监督+自愈）", "ok", "已注册（ghprobe，默认每 5 分钟监督）");
   }
   if (queryResult.error) {
-    return check("task", "计划任务（每分钟自愈）", "warn", `查询失败：${queryResult.error}`,
+    return check("task", "计划任务（监督+自愈）", "warn", `查询失败：${queryResult.error}`,
       "无法确认自愈是否在跑；可重跑 `ghprobe install` 修复");
   }
-  return check("task", "计划任务（每分钟自愈）", "fail", "未注册 —— IP 失效后不会自动换",
+  return check("task", "计划任务（监督+自愈）", "fail", "未注册 —— IP 失效后不会自动换",
     "运行 `ghprobe install` 注册（需要一次 UAC）");
 }
 
