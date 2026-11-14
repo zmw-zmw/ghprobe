@@ -20,7 +20,7 @@ test("UA 中性化: 默认 UA 不含 ghprobe 字样,config 默认键与其一致
 
 // ---------- 全灭指数退避 ----------
 
-const IV = { healthy: 45_000, fast: 15_000, offline: 120_000, stuckBackoffMaxMs: 1_800_000 };
+const IV = { healthy: 45_000, fast: 15_000, offline: 120_000, stuckBackoffMaxMs: 300_000 };
 
 test("全灭退避: 首轮仍 fast,连续全灭指数拉开,健康/断网不受 streak 影响", () => {
   const stuck = { action: "full", stuck: ["github.com"] };
@@ -28,7 +28,7 @@ test("全灭退避: 首轮仍 fast,连续全灭指数拉开,健康/断网不受 
   assert.equal(nextIntervalMs(stuck, IV, 1), 15_000, "连续第 1 轮=15s(抖动确认)");
   assert.equal(nextIntervalMs(stuck, IV, 2), 30_000);
   assert.equal(nextIntervalMs(stuck, IV, 3), 60_000);
-  assert.equal(nextIntervalMs(stuck, IV, 9), Math.min(15_000 * 2 ** 8, 1_800_000), "30min 封顶");
+  assert.equal(nextIntervalMs(stuck, IV, 9), 300_000, "测试上限封顶(默认 5min)");
   assert.equal(nextIntervalMs({ action: "full", stuck: [] }, IV, 0), 15_000, "非全灭异常照旧 fast");
   assert.equal(nextIntervalMs({ action: "none", stuck: [] }, IV, 5), 45_000, "健康无视 streak");
   assert.equal(nextIntervalMs(null, IV, 0), 120_000, "断网档不变");

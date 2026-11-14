@@ -83,7 +83,7 @@ export function sampleInterval(base, mode = "poisson", jitter = 0.15) {
 // streak = 连续全灭轮数（runDaemon 维护，成功一轮即清零）：第 n 轮连续全灭退 fast * 2^(n-1)，
 // 首轮全灭仍 15s —— 单轮全灭可能是抖动，密集确认一次；连续全灭才指数拉开。
 export function nextIntervalMs(result, intervals = {}, stuckStreak = 0) {
-  const { healthy = 45_000, fast = 15_000, offline = 120_000, stuckBackoffMaxMs = 1_800_000 } = intervals;
+  const { healthy = 45_000, fast = 15_000, offline = 120_000, stuckBackoffMaxMs = 300_000 } = intervals;
   if (!result || result.offline) { return offline; }
   const stuck = Array.isArray(result.stuck) ? result.stuck.length : 0;
   if (result.action !== "none" || stuck > 0) {
@@ -343,7 +343,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       healthy: cfgNow.schedule?.daemonHealthyMs ?? 45_000,
       fast: cfgNow.schedule?.daemonFastMs ?? 15_000,
       offline: cfgNow.schedule?.daemonOfflineMs ?? 120_000,
-      stuckBackoffMaxMs: cfgNow.schedule?.stuckBackoffMaxMs ?? 1_800_000,
+      stuckBackoffMaxMs: cfgNow.schedule?.stuckBackoffMaxMs ?? 300_000,
     };
     const jitter = deps.jitter ?? cfgNow.schedule?.jitter ?? 0.15;
     const jitterMode = deps.jitterMode ?? cfgNow.schedule?.jitterMode ?? "poisson";
