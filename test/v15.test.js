@@ -12,7 +12,7 @@ import { shuffle, pickEndpoints } from "../src/doh.js";
 
 test("sampleInterval: poisson 样本落在钳位区间,均值近似 base(大样本)", () => {
   const base = 90_000;
-  const samples = Array.from({ length: 400 }, () => sampleInterval(base, "poisson"));
+  const samples = Array.from({ length: 1000 }, () => sampleInterval(base, "poisson"));
   for (const w of samples) {
     assert.ok(w >= base * 0.25 - 1 && w <= base * 3 + 1, `钳位区间外: ${w}`);
   }

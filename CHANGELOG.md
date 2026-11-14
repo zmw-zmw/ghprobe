@@ -42,6 +42,10 @@
   其余域名不再探测/不再写 hosts（其兜底域名也随之退场）。动机（2026-11-14 实战）：
   githubusercontent 家族被运营商精准黑洞（.133 四连 TCP 全死，全网 DNS 只返回这 4 个 IP，
   无备用候选），跟踪它们只产生 stuck 噪音；off = 删键回落默认 9 域名。
+- **候选池顺序修正：seed 先占名额**（github.com/api/ssh/codeload 改为 [seed, auto, azure]）：
+  auto 池一次 meta 采样能有 40+ IP，auto 在前时 seed 的 140.82 永远被挤出 maxPoolIps
+  名额 —— 抖动期活着的 140.82 反而进不了候选（2026-11-14 本机实测）。
+  老用户若配置里带着旧 domainPools 覆盖，把该键删掉即可跟随新默认。
 - **UDP 补充源收录 8.8.8.8**：Google DNS 的 UDP 53 国内多数网络可用（实测 46~108ms、
   答案未污染，且常给出与国产 DNS 不同的 Azure 段 —— 候选面多样性）；代价是 UDP 明文
   可见 + 每轮多 1 个境外 UDP 目标，低调用户可自行移除（lowkey 预设不含）。

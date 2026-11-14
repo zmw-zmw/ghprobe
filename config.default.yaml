@@ -119,15 +119,19 @@ ipPools:
     - 140.82.121.3
 
 # 域名 -> 只探哪些池（不配 = 用全部池）。
-# 两个池互不相干：185.199.x.x 永远不给 github.com 服务，20.x 也不给 raw.githubusercontent.com
+# 两个池互不相干：185.199.x.x（Fastly）永远不给 github.com 服务，20.x 也不给 raw.githubusercontent.com
 # 服务。分开能省掉近一半候选（冷启动最明显）。池名写错时自动退回「用全部池」。
 # auto = poolUpdate 自动从 api.github.com/meta 拉下来的最新网段（缓存不存在时该池为空，自动跳过）。
 # 顺序有意义：靠前的池先占 maxPoolIps 名额。
+# 🔴 0.1.13 改为 seed 在前（2026-11-14 本机实测教训）：auto 池一次 meta 采样能有 40+ IP，
+#    auto 在前时 seed 的 140.82 永远被挤出 maxPoolIps=12 名额 —— 抖动期活着的 140.82 反而
+#    进不了候选，用户撞死 IP。seed 9 个 IP 是多年最稳段，先占名额保证它永远在场；
+#    剩余名额由 auto（最新网段）补齐，azure 兜底。
 domainPools:
-  github.com: [auto, seed, azure]
-  api.github.com: [auto, seed]
-  ssh.github.com: [auto, seed]
-  codeload.github.com: [auto, seed, azure]
+  github.com: [seed, auto, azure]
+  api.github.com: [seed, auto]
+  ssh.github.com: [seed, auto]
+  codeload.github.com: [seed, auto, azure]
   objects.githubusercontent.com: [fastly]
   raw.githubusercontent.com: [fastly]
   gist.githubusercontent.com: [fastly]
