@@ -268,4 +268,6 @@ schedule:
   daemonHealthyMs: 90000   # daemon 健康态探活间隔（毫秒）
   daemonFastMs: 15000      # 异常后密集盯防间隔（毫秒）
   daemonOfflineMs: 120000  # 断网轮询间隔（毫秒）
+  lightProbe: true         # 轻探活（0.1.12）：健康态只探主条目，备选按需才测 —— 对外 TLS 连接数减半
+  jitter: 0.15             # 探测间隔抖动 ±15%：打破精确周期的机器特征（0 = 关闭）
   absentCooldownHours: 1   # 缺失域名冷却（小时）：SNI 层封锁的域名全量也救不回，冷却内不重试

@@ -383,19 +383,38 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
 
   if (current.entries.size === 0) {
     say("hosts 无 ghprobe 记录，触发首次全量");
-    return fullUpdate(cfg, log, content, current, targetDomains(cfg), write, hostsPath, promote, hooks);
+    return fullUpdate(cfg, log, content, current, targetDomains(cfg), write, hostsPath, promote, hooks, [], deps);
   }
 
   // 🔴 主条目 + 备选条目一起探活。旧版只探主条目 —— 于是「主 IP 挂了、备选还是好的」
   //    这种最常见的情况工具根本不知道，直接去重排（撞抖动窗口），而它本来只需把备选提上来。
+  // 0.1.12 轻探活（schedule.lightProbe，默认开）：健康态**只探主条目**，备选按需才测 ——
+  //    主挂了的域名当轮补测它的备选再决策。对外的 TLS 连接数直接砍半
+  //    （反制裁：运营商按「境外连接频率/扇出」画像用户），决策结果与全量探活一致：
+  //    主活 = 域名健康；主死 = 补测备选后照旧走 promote / 重排。
+  const light = cfg.schedule?.lightProbe !== false;
   const pairs = [];
   for (const [d, ip] of current.entries) {
     pairs.push([d, ip, "main"]);
-    for (const alt of current.extras.get(d) || []) { pairs.push([d, alt, "alt"]); }
+    if (!light) {
+      for (const alt of current.extras.get(d) || []) { pairs.push([d, alt, "alt"]); }
+    }
   }
-  const jobs = pairs.map(([d, ip]) => () => probeIp(d, ip, cfg));
+  const jobs = pairs.map(([d, ip]) => () => (deps.probeIp || probeIp)(d, ip, cfg));
   const probed = await pool(jobs, cfg.probe.concurrency);
-  const probeResults = probed.map((r, i) => ({ ...r, role: pairs[i][2] }));
+  let probeResults = probed.map((r, i) => ({ ...r, role: pairs[i][2] }));
+  if (light) {
+    const deadMains = new Set(probeResults.filter((r) => r.role === "main" && !r.ok).map((r) => r.domain));
+    const altPairs = [];
+    for (const d of deadMains) {
+      for (const alt of current.extras.get(d) || []) { altPairs.push([d, alt, "alt"]); }
+    }
+    if (altPairs.length) {
+      const altJobs = altPairs.map(([d, ip]) => () => (deps.probeIp || probeIp)(d, ip, cfg));
+      const altProbed = await pool(altJobs, cfg.probe.concurrency);
+      probeResults = probeResults.concat(altProbed.map((r, i) => ({ ...r, role: altPairs[i][2] })));
+    }
+  }
   for (const r of probeResults) {
     say(`${r.ok ? "[OK ]" : "[FAIL]"}${r.role === "alt" ? " ALT" : "    "} ${r.domain} @ ${r.ip} err=${r.err}`);
   }
@@ -453,16 +472,16 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
   const deadAll = [...byDomain.entries()].filter(([, rs]) => rs.every((r) => !r.ok)).map(([d]) => d);
 
   say(`异常：${decision.reason}`);
-  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath, decision.promote, hooks, deadAll);
+  return fullUpdate(cfg, log, content, current, decision.domains, write, hostsPath, decision.promote, hooks, deadAll, deps);
 }
 
 // 全量探测 + 部分更新 + 写回；护栏与粘性都在 applyDelta 里体现。
 // 只探 diagnose 里的域名：典型场景是「github.com 的 IP 死了，codeload / jsdelivr 还活着」，
 // 此时探 1 个域名（~8 个候选）而不是 6 个（~48 个），失败发现到修好的时间从 ~90s 压到 ~20s。
-async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map(), hooks = {}, deadAll = []) {
+async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map(), hooks = {}, deadAll = [], deps = {}) {
   const say = log || (() => {});
   // diagnose 为空 = 只有「提上备选」要做，没有需要重排的域名 -> 跳过探测，直接写提升结果
-  const r = diagnose.length ? await runProbe(cfg, log, diagnose) : { ranked: new Map(), extra: new Map(), raw: [] };
+  const r = diagnose.length ? await (deps.runProbe || runProbe)(cfg, log, diagnose) : { ranked: new Map(), extra: new Map(), raw: [] };
   const tlsBlocked = blockedDomainsFromRaw(r.raw);
   const d = applyDelta(current, r.ranked, r.extra, diagnose, cfg, promote, tlsBlocked);
 

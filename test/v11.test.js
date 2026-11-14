@@ -20,6 +20,7 @@ test("runDaemon: 间隔从 cfg.schedule 接线(健康态 sleep 用 daemonHealthy
   const sleeps = [];
   const cfg = { schedule: { healthMin: 5, daemonHealthyMs: 90_000, daemonFastMs: 15_000, daemonOfflineMs: 120_000 } };
   await runDaemon(cfg, () => {}, {
+    jitter: 0,
     maxCycles: 2, // 第 2 轮才返回,保证第 1 轮后发生一次 sleep
     cycle: async () => ({ action: "none", reason: "全部健康" }),
     sleep: async (ms) => { sleeps.push(ms); },
@@ -43,6 +44,7 @@ test("nextIntervalMs: 不传 intervals 时退回函数级默认(45s/15s/120s),�
 test("runDaemon: deps.intervals 显式注入优先于 cfg(单测/自定义不变)", async () => {
   const sleeps = [];
   await runDaemon({ schedule: { daemonHealthyMs: 90_000 } }, () => {}, {
+    jitter: 0,
     maxCycles: 2,
     cycle: async () => ({ action: "none" }),
     sleep: async (ms) => { sleeps.push(ms); },

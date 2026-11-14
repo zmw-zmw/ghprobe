@@ -311,12 +311,17 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
     if (newer && newer.pid !== process.pid && heartbeatFresh(newer) && processAlive(newer.pid)) {
       return { started: true, cycles, yielded: true }; // 让位给更年轻的实例
     }
-    // 间隔每轮从最新配置取：改 schedule.* 热生效，不用重启 daemon
+    // 间隔每轮从最新配置取：改 schedule.* 热生效，不用重启 daemon。
+    // 抖动（schedule.jitter，默认 ±15%）：打破精确周期的机器特征 —— 反制裁视角下，
+    // 「每 90.000s 准时握手」和「每 90s±13s 自然波动」在运营商画像里是两种用户。
     const intervals = deps.intervals || {
       healthy: cfgNow.schedule?.daemonHealthyMs ?? 45_000,
       fast: cfgNow.schedule?.daemonFastMs ?? 15_000,
       offline: cfgNow.schedule?.daemonOfflineMs ?? 120_000,
     };
-    await sleep(nextIntervalMs(result, intervals));
+    const jitter = deps.jitter ?? cfgNow.schedule?.jitter ?? 0.15;
+    const base = nextIntervalMs(result, intervals);
+    const wait = jitter > 0 ? base * (1 - jitter + Math.random() * 2 * jitter) : base;
+    await sleep(wait);
   }
 }

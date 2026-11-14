@@ -47,6 +47,7 @@ test("runDaemon：maxCycles + 心跳逐轮刷新 + 间隔序列（健康/异常/
   let cycles = 0;
   const r = await runDaemon({}, () => {}, {
     maxCycles: 3,
+    jitter: 0,
     sleep: async (ms) => { sleeps.push(ms); },
     cycle: async () => {
       cycles += 1;
@@ -64,6 +65,7 @@ test("runDaemon：maxCycles + 心跳逐轮刷新 + 间隔序列（健康/异常/
 test("runDaemon：offline 轮走 120s", async () => {
   const sleeps = [];
   await runDaemon({}, () => {}, {
+    jitter: 0,
     maxCycles: 2,
     sleep: async (ms) => { sleeps.push(ms); },
     cycle: async () => ({ action: "skip", reason: "本地无网络连接", offline: true }),
@@ -75,7 +77,7 @@ test("runDaemon：让位给更年轻的实例（真实心跳文件 + 活 pid）"
   // pid 4（Windows System）恒存在：伪造它的「新鲜心跳」模拟另一个 daemon
   writeHeartbeat(); // 先确保目录存在
   fs.writeFileSync(heartbeatPath(), JSON.stringify({ at: new Date().toISOString(), pid: 4 }));
-  const r = await runDaemon({}, () => {}, { maxCycles: 1, cycle: async () => ({ action: "none", stuck: [] }) });
+  const r = await runDaemon({}, () => {}, { jitter: 0, maxCycles: 1, cycle: async () => ({ action: "none", stuck: [] }) });
   assert.equal(r.started, false);
   assert.ok(r.reason.includes("已有 daemon"));
 });
