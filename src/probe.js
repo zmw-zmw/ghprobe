@@ -20,7 +20,7 @@ export function poolsForDomain(cfg, domain) {
 
 // 解析一批域名的候选 IP。域名之间并行 —— DoH 是纯网络等待，串行会把最坏耗时
 // 乘上域名数（6 个域名 × dohMs 5s = 30s），并行后压回一个 dohMs。
-async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "" } = {}) {
+async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "", extra = null } = {}) {
   return Promise.all(domains.map(async (domain) => {
     say(prefix ? `${prefix}探测 ${domain}` : `解析 ${domain}`);
     const { ips } = await resolveAll(cfg.doh, domain, cfg.timeouts.dohMs, cfg.probe?.dohMaxPerRound ?? 0);
@@ -41,9 +41,11 @@ async function resolveCandidates(cfg, domains, say, { usePool = true, prefix = "
     // stuck=github.com」。分开限额后内置池一定拿得到名额。
     const fromDoh = [...new Set([...(ips || []), ...udpIps])].slice(0, cfg.probe.maxCandidates);
     const fromPool = usePool ? poolsForDomain(cfg, domain).slice(0, cfg.probe.maxPoolIps ?? 12) : [];
-    // 候选顺序每轮洗牌（0.1.14 反运营商）：探测是按候选序并发跑的，固定顺序 = 对外连接
-    // 序列确定。洗牌只影响「先连哪个」，排名按分数算，结果语义不变。
-    const candidates = shuffle([...new Set([...fromDoh, ...fromPool])]);
+    // 坟场复活（0.1.13「探测全」）：extra = 域名 stuck 时由 health.js 从坟场补进来的
+    // 「曾经活过」的 IP —— 与 DoH/池答案合并去重，按正常排名流程竞争，活了就能写进 hosts。
+    // 候选顺序每轮洗牌（反运营商）：探测按候选序并发，固定顺序 = 对外连接序列确定。
+    // 洗牌只影响「先连哪个」，排名按分数算，结果语义不变。
+    const candidates = shuffle([...new Set([...fromDoh, ...fromPool, ...(extra?.get(domain) || [])])]);
     say(`  候选 ${candidates.length} 个（DoH ${ips?.length ?? 0} + UDP ${udpIps.length} + 池 ${fromPool.length}）: ${candidates.join(", ")}`);
     return { domain, candidates };
   }));
@@ -63,14 +65,14 @@ function jobsOf(cfg, resolved) {
 // onlyDomains：只探这些域名。部分更新（health 只发现某 1 个域名坏了）时用它，
 // 避免「1 个域名失效却把 6 个域名、近 50 个候选全探一遍」——那是几十秒的纯浪费。
 // 传 null / 空数组 = 全量。注意兜底域名不在 cfg.domains 里，若被点名必须单独直探。
-export async function runProbe(cfg, log, onlyDomains = null) {
+export async function runProbe(cfg, log, onlyDomains = null, extraByDomain = null) {
   const say = log || (() => {});
   const fbDomains = Object.values(cfg.fallbacks || {}).flat();
   const want = onlyDomains && onlyDomains.length ? new Set(onlyDomains) : null;
   const mainDomains = cfg.domains.filter((d) => !want || want.has(d));
   const directFb = want ? [...want].filter((d) => fbDomains.includes(d) && !cfg.domains.includes(d)) : [];
 
-  const resolved = await resolveCandidates(cfg, mainDomains, say);
+  const resolved = await resolveCandidates(cfg, mainDomains, say, { extra: extraByDomain });
   let all = await pool(jobsOf(cfg, resolved), cfg.probe.concurrency);
   let ranked = rank(all, cfg);
 

@@ -8,6 +8,7 @@ import { runProbe } from "./probe.js";
 import { pickAlts } from "./ranker.js";
 import { applyHosts, mergeHosts, WIN_HOSTS, acquireHostsLock, releaseHostsLock } from "./hosts.js";
 import { detectProxy, probeThroughProxy } from "./proxy.js";
+import * as graveyard from "./graveyard.js";
 
 const BEGIN = "# === ghprobe begin ===";
 const END = "# === ghprobe end ===";
@@ -441,6 +442,13 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
   for (const r of probeResults) {
     say(`${r.ok ? "[OK ]" : "[FAIL]"}${r.role === "alt" ? " ALT" : "    "} ${r.domain} @ ${r.ip} err=${r.err}`);
   }
+  // 坟场记录（0.1.13「探测全」）：条目探测结果回写 —— 曾经活过的 IP 永不丢失，
+  // 域名 stuck 时按「最近活过」复活。deps.graveyard 可注入（测试用）。
+  const gyEntry = deps.graveyard || graveyard;
+  const gyEntryData = gyEntry.load();
+  for (const r of probeResults) {
+    gyEntry.record(gyEntryData, r.domain, [r]);
+  }
 
   // 0.1.7 代理视角判活：有失败条目且本地代理活着时，问代理「这 IP 从你那边看活不活」。
   // 只对**非 TLS 指纹阻断**的失败做 —— SNI 级阻断是本机中间盒掐的，代理视角活得再好
@@ -504,7 +512,24 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
 async function fullUpdate(cfg, log, content, current, diagnose, write, hostsPath = WIN_HOSTS, promote = new Map(), hooks = {}, deadAll = [], deps = {}) {
   const say = log || (() => {});
   // diagnose 为空 = 只有「提上备选」要做，没有需要重排的域名 -> 跳过探测，直接写提升结果
-  const r = diagnose.length ? await (deps.runProbe || runProbe)(cfg, log, diagnose) : { ranked: new Map(), extra: new Map(), raw: [] };
+  // 坟场复活探测（0.1.13「探测全」）：域名 stuck（本轮候选全死）时，把「曾经活过」的
+  // 坟场 IP 按 lastAlive 新→旧补进候选（每域名上限 probe.graveyardMaxIps，默认 6，0=关）
+  // —— DNS 答案变更后从候选面消失的历史段（57.155 / 167.82 这类）由坟场找回。
+  // 探测后的结果照常回写坟场：活了 -> lastAlive 刷新（下次优先复活它）。
+  const gyUpd = deps.graveyard || graveyard;
+  const gyMax = cfg.probe?.graveyardMaxIps ?? 6;
+  const gyUpdData = gyMax > 0 ? gyUpd.load() : null;
+  const extraByDomain = new Map();
+  if (gyUpdData) {
+    for (const d of diagnose) {
+      const exclude = new Set([...(current.entries.get(d) || []), ...(current.extras.get(d) || [])]);
+      const ips = gyUpd.pick(gyUpdData, d, exclude, gyMax);
+      if (ips.length) { extraByDomain.set(d, ips); say(`坟场复活探测 ${d}: ${ips.join(", ")}`); }
+    }
+  }
+  const r = diagnose.length ? await (deps.runProbe || runProbe)(cfg, log, diagnose, extraByDomain) : { ranked: new Map(), extra: new Map(), raw: [] };
+  for (const [d, rs] of (r.ranked || new Map())) { gyUpd.record(gyUpdData, d, rs); }
+  gyUpd.save(gyUpdData);
   const tlsBlocked = blockedDomainsFromRaw(r.raw);
   const d = applyDelta(current, r.ranked, r.extra, diagnose, cfg, promote, tlsBlocked);
 
