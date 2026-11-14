@@ -103,11 +103,11 @@ test("UDP 报文与 DoH 报文同构:buildQuery 的输出可以被 parseA 解析
   assert.deepEqual(parseA(answer.subarray(0, off)), ["57.155.223.240", "57.155.223.241"]);
 });
 
-test("loadConfig: dohUdp 默认开,3 个国产公共 DNS,与 DoH 端点不重叠", async () => {
+test("loadConfig: dohUdp 默认开,3 国产 + 8.8.8.8,与 DoH 端点不重叠", async () => {
   const { loadConfig } = await import("../src/config.js");
   const cfg = loadConfig();
   assert.equal(cfg.dohUdp.enabled, true);
-  assert.deepEqual(cfg.dohUdp.servers, ["114.114.114.114", "119.29.29.29", "180.76.76.76"]);
+  assert.deepEqual(cfg.dohUdp.servers, ["114.114.114.114", "119.29.29.29", "180.76.76.76", "8.8.8.8"]);
   assert.equal(cfg.dohUdp.timeoutMs, 2000);
   for (const s of cfg.dohUdp.servers) {
     assert.ok(!cfg.doh.some((e) => e.host === s), `${s} 不应与 DoH 端点重复`);

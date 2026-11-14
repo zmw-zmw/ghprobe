@@ -10,11 +10,12 @@ import { applyMinimal, removeMinimal, isMinimal, readUserConfig, writeUserConfig
 import { loadConfig, userConfigPath } from "../src/config.js";
 import { targetDomains } from "../src/health.js";
 
-test("minimal: on 收敛 domains,用户其它键原样保留", () => {
+test("minimal: on 收敛 domains(主站+assets,页面完整性),用户其它键原样保留", () => {
   const user = { doh: [{ host: "223.5.5.5" }], schedule: { daemonHealthyMs: 120_000 }, custom: 1 };
   const on = applyMinimal(user);
   assert.equal(isMinimal(on), true);
-  assert.deepEqual(on.domains, ["github.com"]);
+  assert.deepEqual(on.domains, ["github.com", "github.githubassets.com"],
+    "assets 必须带上 —— 主站页面的 CSS/JS 全在它上面,不带必慢");
   assert.equal(on.schedule.daemonHealthyMs, 120_000, "用户其它键保留");
   assert.deepEqual(on.doh, [{ host: "223.5.5.5" }]);
   assert.equal(on.custom, 1);
@@ -39,13 +40,14 @@ test("minimal: off 删键回落(用户自有键保留),与 lowkey 互不干扰",
   assert.equal(removeMinimal(null) && typeof removeMinimal(null), "object", "空输入不抛");
 });
 
-test("minimal: 端到端 —— 写盘后 loadConfig/targetDomains 只剩 github.com", () => {
+test("minimal: 端到端 —— 写盘后 loadConfig/targetDomains 只剩主站两域名", () => {
   const original = readUserConfig();
   try {
     writeUserConfig(applyMinimal(original || {}));
     const cfg = loadConfig();
-    assert.deepEqual(cfg.domains, ["github.com"], "配置热生效:daemon 下一轮只探主站");
-    assert.deepEqual(targetDomains(cfg), ["github.com"], "orphan 清理以此为据,其余 hosts 条目会被剥掉");
+    assert.deepEqual(cfg.domains, ["github.com", "github.githubassets.com"], "配置热生效");
+    assert.deepEqual(targetDomains(cfg), ["github.com", "github.githubassets.com"],
+      "orphan 清理以此为据,其余 hosts 条目会被剥掉");
     writeUserConfig(removeMinimal(readUserConfig()));
     const restored = loadConfig();
     assert.ok(restored.domains.length >= 9, "off 后回落默认域名数");

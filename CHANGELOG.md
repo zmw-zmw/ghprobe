@@ -36,10 +36,13 @@
 - **候选顺序每轮洗牌**：探测按候选序并发，固定顺序 = 对外连接序列确定；洗牌只影响
   「先连哪个」，排名按分数算，结果语义不变。
 - **主站模式（`ghprobe minimal on/off`）**：只加速 GitHub 主站 —— domains 收敛为
-  [github.com]，其余域名不再探测/不再写 hosts（其兜底域名也随之退场）。动机
-  （2026-11-14 实战）：githubusercontent 家族被运营商精准黑洞（.133 四连 TCP 全死，
-  全网 DNS 只返回这 4 个 IP，无备用候选），跟踪它们只产生 stuck 噪音；
-  off = 删键回落默认 9 域名。
+  [github.com + github.githubassets.com]（页面 CSS/JS 全在 assets 上，不带必慢），
+  其余域名不再探测/不再写 hosts（其兜底域名也随之退场）。动机（2026-11-14 实战）：
+  githubusercontent 家族被运营商精准黑洞（.133 四连 TCP 全死，全网 DNS 只返回这 4 个 IP，
+  无备用候选），跟踪它们只产生 stuck 噪音；off = 删键回落默认 9 域名。
+- **UDP 补充源收录 8.8.8.8**：Google DNS 的 UDP 53 国内多数网络可用（实测 46~108ms、
+  答案未污染，且常给出与国产 DNS 不同的 Azure 段 —— 候选面多样性）；代价是 UDP 明文
+  可见 + 每轮多 1 个境外 UDP 目标，低调用户可自行移除（lowkey 预设不含）。
 - **targetDomains 语义修正**：兜底域名只跟随被跟踪的主域名 —— 主域名不在 domains 里时
   其兜底不再进探测/orphan 名单。对默认配置无行为变化。
 
