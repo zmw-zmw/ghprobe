@@ -73,6 +73,15 @@ export function sampleInterval(base, mode = "poisson", jitter = 0.15) {
   return Math.min(Math.max(w, base * 0.25), base * 2);
 }
 
+// 空闲重排判定（纯函数，0.1.13「在用户没访问时候切换」）：门控成本 0（用户没访问）且
+// 距上次空闲重排 ≥ idleReRankMin 分钟才到期；idleReRankMin ≤ 0 = 关闭。
+// daemonCycle 调用；判定通过才把 hooks.idleReRank 置位（health 内部还会复核真实状态）。
+export function idleReRankDue(cost, lastReRank, nowMs, idleReRankMin = 30) {
+  if (!idleReRankMin || idleReRankMin <= 0) { return false; }
+  if (cost !== 0) { return false; }
+  return nowMs - lastReRank >= idleReRankMin * 60_000;
+}
+
 // 自适应间隔（纯函数）：
 //   断网                -> 120s（断网时探测无意义，省唤醒；恢复由下一轮本地检查发现）
 //   全灭（stuck 非空）  -> 指数退避（0.1.13 反运营商）：15s -> 30s -> 60s -> ... 上限 stuckBackoffMaxMs
@@ -83,7 +92,9 @@ export function sampleInterval(base, mode = "poisson", jitter = 0.15) {
 // 怎么探都全灭的时候，唯一有用的动作是等池子刷（poolUpdate 到点自动跑）或等链路自愈。
 // streak = 连续全灭轮数（runDaemon 维护，成功一轮即清零）：第 n 轮连续全灭退 fast * 2^(n-1)，
 // 首轮全灭仍 15s —— 单轮全灭可能是抖动，密集确认一次；连续全灭才指数拉开。
-export function nextIntervalMs(result, intervals = {}, stuckStreak = 0) {
+// healthyStreak = 连续健康轮数（0.1.13 探活优化）：连续健康 ≥3 轮后间隔按 +25%/轮温和
+// 拉长、上限 2×healthy —— 稳定阶段减少境外连接（反画像），任何一轮异常立即打回原形。
+export function nextIntervalMs(result, intervals = {}, stuckStreak = 0, healthyStreak = 0) {
   const { healthy = 45_000, fast = 15_000, offline = 120_000, stuckBackoffMaxMs = 300_000 } = intervals;
   if (!result || result.offline) { return offline; }
   const stuck = Array.isArray(result.stuck) ? result.stuck.length : 0;
@@ -91,7 +102,8 @@ export function nextIntervalMs(result, intervals = {}, stuckStreak = 0) {
     if (stuck > 0 && stuckStreak > 1) { return Math.min(fast * 2 ** (stuckStreak - 1), stuckBackoffMaxMs); }
     return fast;
   }
-  return healthy;
+  const stretch = healthyStreak >= 3 ? Math.min(1 + (healthyStreak - 3) * 0.25, 2) : 1;
+  return Math.min(healthy * stretch, healthy * 2);
 }
 
 // 单轮自愈：暂停跳过 -> 代理状态监测（存活->死亡跃迁即全量重测）-> 断网跳过
@@ -273,7 +285,20 @@ export async function daemonCycle(cfg, log, deps = {}) {
     }
   }
   const hooks = deps.gate ? { beforeApply: deps.gate.beforeApply } : {};
+  // 空闲重排判定（0.1.13「在用户没访问时候切换」）：门控成本 0（用户没访问）且到
+  // idleReRankMin 周期时，本轮升格为全量重排 —— health 内部的门控会再核一次真实状态
+  //（用户此刻回来了就不打扰）。cfg.schedule.idleReRankMin = 0 关闭。
+  const idleReRankMin = cfg.schedule?.idleReRankMin ?? 30;
+  if (deps.idleState && deps.gate?.activityCost) {
+    try {
+      const cost = await deps.gate.activityCost(cfg);
+      if (idleReRankDue(cost, deps.idleState.lastReRank, Date.now(), idleReRankMin)) {
+        hooks.idleReRank = true;
+      }
+    } catch { /* 活动检测失败就跳过本轮空闲重排 */ }
+  }
   const result = await runHealth(cfg, log, true, WIN_HOSTS, undefined, hooks);
+  if (hooks.idleReRank && deps.idleState) { deps.idleState.lastReRank = Date.now(); }
   // 空闲落地：上轮被推迟的块，此刻成本低就写掉（含全灭护栏）
   if (deps.gate && deps.gate.pending && (!result || result.action === "none" || result.action === "deferred")) {
     try {
@@ -309,6 +334,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
   const cycle = deps.cycle || ((c, l) => daemonCycle(c, l, {
     gate, applyHosts: deps.applyHosts, hostsPath: deps.hostsPath,
     proxyState, detectProxy: deps.detectProxy, runProbe: deps.runProbe, readHosts: deps.readHosts,
+    idleState: deps.idleState !== undefined ? deps.idleState : { lastReRank: 0 },
   }));
   const sleep = deps.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const maxCycles = deps.maxCycles ?? Infinity;
@@ -318,6 +344,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
   log(`daemon 已启动 (pid ${process.pid})`);
   let cycles = 0;
   let stuckStreak = 0; // 连续全灭轮数（0.1.13 全灭退避用），成功一轮清零
+  let healthyStreak = 0; // 连续健康轮数（0.1.13 健康期拉长用），异常一轮清零
   for (;;) {
     let result = null;
     let cfgNow = cfg;
@@ -326,6 +353,8 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
       result = await cycle(cfgNow, log);
       if (result && result.action) { log(`daemon cycle action=${result.action} reason=${result.reason || ""}`); }
       stuckStreak = result && Array.isArray(result.stuck) && result.stuck.length > 0 ? stuckStreak + 1 : 0;
+      healthyStreak = result && result.action === "none" && (!Array.isArray(result.stuck) || result.stuck.length === 0) && !result.offline
+        ? healthyStreak + 1 : 0;
     } catch (e) {
       log(`daemon 循环异常（不退出，继续下一轮）: ${e.message}`);
       result = { action: "error" }; // 异常按「有事」处理 -> fast 档，别在故障后睡满 2 分钟
@@ -348,7 +377,7 @@ export async function runDaemon(cfg, log = () => {}, deps = {}) {
     };
     const jitter = deps.jitter ?? cfgNow.schedule?.jitter ?? 0.15;
     const jitterMode = deps.jitterMode ?? cfgNow.schedule?.jitterMode ?? "poisson";
-    const base = nextIntervalMs(result, intervals, stuckStreak);
+    const base = nextIntervalMs(result, intervals, stuckStreak, healthyStreak);
     await sleep(sampleInterval(base, jitterMode, jitter));
   }
 }

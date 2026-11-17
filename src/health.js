@@ -470,6 +470,14 @@ export async function runHealth(cfg, log, write = false, hostsPath = WIN_HOSTS, 
 
   const decision = decide(probeResults, current, cfg, vantage);
   if (decision.action === "none") {
+    // 空闲窗口主动重排（0.1.13「在用户没访问时候切换」）：全部健康 + 门控成本 0
+    //（用户没访问）+ daemon 判定到期时，做一次全量重排把条目换到当前最优 ——
+    // 用户回来时就是最佳状态。fullUpdate 内部的 beforeApply 门控仍会拦
+    // 「用户此刻回来了」的情况，不会打扰到正在使用的人。
+    if (hooks?.idleReRank && current.entries.size) {
+      say(`空闲窗口主动重排（用户未访问，识别用户行为：打扰成本 0）：全量重排 ${current.entries.size} 个域名`);
+      return fullUpdate(cfg, log, content, current, [...current.entries.keys()], write, hostsPath, decision.promote, hooks, [], deps);
+    }
     say(`健康：${decision.reason}`);
     return { action: "none", reason: decision.reason, block: null, stuck: [] };
   }

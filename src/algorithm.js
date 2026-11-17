@@ -169,5 +169,11 @@ export function createSwitchGate(deps = {}) {
     },
     get pending() { return Boolean(state.pendingBlock); },
     get lastReason() { return state.lastReason || ""; },
+    // daemon 空闲重排判定用（0.1.13「在用户没访问时候切换」）：返回当前打扰成本，
+    // 0 = 用户没访问（无浏览器前台），是做重排/深度探测的安全窗口。
+    async activityCost(cfg) {
+      const activity = await activityNow(cfg);
+      return switchCost(activity, cfg?.algorithm?.weights);
+    },
   };
 }

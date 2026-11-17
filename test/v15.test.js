@@ -32,7 +32,7 @@ test("sampleInterval: jitter=0 / fixed 恒精确,uniform 落 ±jitter 区间", (
   }
 });
 
-test("runDaemon: 默认 poisson——等待无固定周期且不被钳位区间约束死", async () => {
+test("runDaemon: 默认 poisson——等待无固定周期（健康期拉长后上限 4×base）", async () => {
   const sleeps = [];
   await runDaemon({ schedule: { daemonHealthyMs: 90_000 } }, () => {}, {
     maxCycles: 31,
@@ -40,11 +40,12 @@ test("runDaemon: 默认 poisson——等待无固定周期且不被钳位区间�
     sleep: async (ms) => { sleeps.push(ms); },
   });
   assert.equal(sleeps.length, 30);
+  // 健康期拉长(0.1.13):streak≥3 后 base 温和拉长至 2×,泊松钳位再 ×2 -> 上限 4×base
   for (const w of sleeps) {
-    assert.ok(w >= 90_000 * 0.25 - 1 && w <= 90_000 * 2 + 1, `泊松钳位区间外: ${w}`);
+    assert.ok(w >= 90_000 * 0.25 - 1 && w <= 90_000 * 4 + 1, `拉长后区间外: ${w}`);
   }
   const mean = sleeps.reduce((a, b) => a + b, 0) / sleeps.length;
-  assert.ok(mean > 90_000 * 0.4 && mean < 90_000 * 2, `30 样本均值应靠近 base: ${mean}`);
+  assert.ok(mean > 90_000 * 0.7 && mean < 90_000 * 2.5, `均值应落在拉长区间: ${mean}`);
   assert.ok(new Set(sleeps).size >= 10, `应充分随机: ${new Set(sleeps).size} 个不同值`);
 });
 

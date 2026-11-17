@@ -108,14 +108,15 @@ test("lightProbe: false 退回旧行为(主备都探)", async () => {
 
 test("抖动: sleep 落在 [0.85x, 1.15x] 区间内(uniform 模式 ±15%)", async () => {
   const sleeps = [];
-  // 🔴 runDaemon 每轮 loadConfig(),注入的 cfg 不决定间隔 —— 模式/幅度必须走 deps
+  // 🔴 runDaemon 每轮 loadConfig(),注入的 cfg 不决定间隔 —— 模式/幅度必须走 deps;
+  // 4 轮以内的连续健康不会触发健康期拉长(streak≥3 才起步),保持纯 uniform 语义
   await runDaemon({}, () => {}, {
     jitterMode: "uniform",
-    maxCycles: 8,
+    maxCycles: 4,
     cycle: async () => ({ action: "none" }),
     sleep: async (ms) => { sleeps.push(ms); },
   });
-  assert.equal(sleeps.length, 7, "8 轮之间 7 次 sleep");
+  assert.equal(sleeps.length, 3, "4 轮之间 3 次 sleep");
   for (const ms of sleeps) {
     assert.ok(ms >= 90_000 * 0.85 - 1 && ms <= 90_000 * 1.15 + 1, `抖动应落区间: ${ms}`);
   }
